@@ -1,0 +1,63 @@
+scope: zabbix-ha
+namespace: /service
+name: db2
+
+etcd3:
+  hosts:
+    - 192.168.20.10:2379
+    - 192.168.20.28:2379
+    - 192.168.20.23:2379
+
+restapi:
+  listen: 192.168.20.28:8008
+  connect_address: 192.168.20.28:8008
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        shared_preload_libraries: 'timescaledb'
+        listen_addresses: '*'
+        max_connections: 200
+        hot_standby: "on"
+        wal_level: replica
+        max_wal_senders: 10
+        max_replication_slots: 10
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - local all all trust
+    - host all all 127.0.0.1/32 trust
+    - host replication replicator 192.168.20.0/24 scram-sha-256
+    - host zabbix zabbix 192.168.20.0/24 scram-sha-256
+    - host all zbx_monitor 192.168.20.0/24 scram-sha-256
+    - host all all 192.168.20.0/24 scram-sha-256
+
+postgresql:
+  listen: 192.168.20.28:5432
+  connect_address: 192.168.20.28:5432
+  data_dir: /var/lib/postgresql/16/main
+  bin_dir: /usr/lib/postgresql/16/bin
+  pgpass: /var/lib/postgresql/.pgpass
+  authentication:
+    replication:
+      username: replicator
+      password: 
+    superuser:
+      username: postgres
+      password: 
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false
