@@ -20,4 +20,4 @@
 ---
 
 ## 📐 2. 아키텍처 다이어그램 (Architecture Diagram)
-![alt text](<제목 없음.png>)
+![alt text](<AD.png>)
