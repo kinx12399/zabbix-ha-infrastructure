@@ -46,10 +46,10 @@
 
 ### 4.2. Database 계층 (Patroni + PostgreSQL 16 + TimescaleDB)
 - **Patroni 기반 이중화 DB:** PostgreSQL 16 실시간 스트리밍 복제 및 자동 장애 승격(Failover) 구성을 위한 Patroni 적용.
-- **etcd 3-Node Quorum:** DB 노드 2개(`DB1`, `DB2`)와 App 노드 1개(`Server1`)에 etcd 분산 배치로 Split-Brain 완벽 방지.
+- **etcd 3-Node Quorum:** DB 노드 2개(`DB1`, `DB2`)와 App 노드 1개(`Server1`)에 etcd 분산 배치로 Split-Brain 방지.
 - **App 서버 내 Local HAProxy 배치:** 
   - App 서버 내부의 Local HAProxy가 Patroni REST API(`8008/primary`) 헬스체크를 수행하여 항상 200 OK를 반환하는 Leader DB(`5432`)로만 커넥션을 점검.
-- **TimescaleDB 확장성 확보:** 시계열 하이퍼테이블(Hypertable)을 주입하여 대규모 성능 데이터 집계 및 삭제(Housekeeper) 처리 시 발생할 수 있는 DB I/O 병목 완화.
+- **TimescaleDB Extention:** 시계열 하이퍼테이블(Hypertable)을 주입하여 대규모 성능 데이터 집계 및 삭제(Housekeeper) 처리 시 발생할 수 있는 DB I/O 병목 완화.
 
 ### 4.3. Proxy 계층 (Zabbix 7.0 Proxy Group & Multi-IP HA)
 - **Proxy Group 수집 부하 분산:** Zabbix 7.0 신규 기능인 `Proxy Group`을 구성하여, 단일 프록시 장애 시 타겟 호스트 모니터링 작업을 즉시 남은 프록시가 승계.
@@ -61,8 +61,8 @@
 | 장애 발생 시나리오 | 감지 및 판단 주체 | 자동 조치 동작 내용 | 서비스 복구 타임 |
 | :--- | :--- | :--- | :--- |
 | **Leader DB (`DB1`) 다운** | Patroni & etcd Quorum (REST API `8008`) | `DB2`가 Leader로 즉시 승격 ➔ App 서버 내 Local HAProxy가 이를 감지하고 `DB2:5432`로 커넥션 전환 | **5초 이내** |
-| **Active Server (`Server1`) 다운** | Zabbix Native HA (`ha_node`) | `Server1`이 `active` 상태 승격 ➔ 프록시들이 세미콜론 세팅에 따라 `Server1` 사설 IP로 데이터 전송 노드 자동 전환 | **60초 이내** |
-| **Single Proxy (`Proxy1`) 다운** | Zabbix Server (Proxy Group Health Check) | `ixcloud-proxy-group` 알고리즘에 의해 `Proxy1` 담당 수집 호스트가 `Proxy2`로 승계 및 이관 | **즉시 (Data Loss 0%)** |
+| **Active Server (`Server1`) 다운** | Zabbix Native HA (`ha_node`) | `Server1`이 `active` 상태 승격 ➔ 프록시들이 `Server2` 로 데이터 전송 노드 자동 전환 | **30초 이내** |
+| **Single Proxy (`Proxy1`) 다운** | Zabbix Server (Proxy Group Health Check) | `Proxygroup` 알고리즘에 의해 `Proxy1` 담당 수집 호스트가 `Proxy2`로 승계 및 이관 | **즉시** |
 
 ---
 
