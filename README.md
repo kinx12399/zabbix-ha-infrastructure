@@ -1,12 +1,12 @@
-# Zabbix 7.0 HA 통합 모니터링 인프라
+# Zabbix 7.0.29 HA 통합 모니터링 인프라
 
-![Zabbix](https://img.shields.io/badge/Zabbix-7.0%20LTS-red?style=flat&logo=zabbix)
+![Zabbix](https://img.shields.io/badge/Zabbix-7.0.29%20LTS-red?style=flat&logo=zabbix)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue?style=flat&logo=postgresql)
 ![TimescaleDB](https://img.shields.io/badge/TimescaleDB-2.x-fdb515?style=flat&logo=timescale)
 ![Patroni](https://img.shields.io/badge/Patroni-HA-green?style=flat)
 ![HAProxy](https://img.shields.io/badge/HAProxy-Primary%20Router-blue?style=flat)
 
-Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0 LTS 기반 단일 플랫폼**으로 통합하고, Server·Database·Proxy 계층을 이중화한 프로젝트입니다. PostgreSQL 16과 TimescaleDB로 시계열 데이터 처리 기반을 개선했으며, Patroni·etcd·HAProxy를 조합해 쓰기 가능한 Primary DB로 자동 연결되도록 구성했습니다.
+Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0.29 LTS 기반 단일 플랫폼**으로 통합하고, Server·Database·Proxy 계층을 이중화한 프로젝트입니다. PostgreSQL 16과 TimescaleDB로 시계열 데이터 처리 기반을 개선했으며, Patroni·etcd·HAProxy를 조합해 쓰기 가능한 Primary DB로 자동 연결되도록 구성했습니다.
 
 > 이 저장소의 주소·계정·비밀번호는 `<MASKED_...>` 형태로 비식별화되어 있습니다. 배포 전에 환경별 값으로 교체하고 비밀정보는 Git이 아닌 Vault, systemd credential, Ansible Vault 등의 별도 저장소에서 관리하세요.
 
@@ -17,6 +17,7 @@ Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0 
 - [주요 성과](#주요-성과)
 - [저장소 구성](#저장소-구성)
 - [구축 및 포팅 매뉴얼](#구축-및-포팅-매뉴얼)
+  - [IXcloud 보안그룹](#2-1-ixcloud-보안그룹-구성)
 - [Zabbix 및 Nagios 마이그레이션](#zabbix-및-nagios-마이그레이션)
 - [부하 테스트](#부하-테스트)
 - [Failover 검증](#failover-검증)
@@ -27,10 +28,10 @@ Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0 
 
 | 구분 | 내용 |
 | --- | --- |
-| 프로젝트명 | Zabbix 7.0 기반 통합 모니터링 시스템 구축 및 Nagios 마이그레이션 |
+| 프로젝트명 | Zabbix 7.0.29 기반 통합 모니터링 시스템 구축 및 Nagios 마이그레이션 |
 | 수행 기간 | 2026.07.15 ~ 2026.08.05 |
 | 기존 환경 | Zabbix 6.0 LTS, MySQL 8.0, Zabbix Agent, Nagios, 단일 VM 중심 구성 |
-| 개선 환경 | Zabbix 7.0 LTS, PostgreSQL 16, TimescaleDB, Agent 2, Patroni, etcd, HAProxy, Proxy Group |
+| 개선 환경 | Zabbix 7.0.29 LTS, PostgreSQL 16, TimescaleDB, Agent 2, Patroni, etcd, HAProxy, Proxy Group |
 | 수행 범위 | 아키텍처 설계, 구축·업그레이드, Nagios 항목 분석·이관, 외부검사 개발, 부하 및 Failover 테스트, 문서화 |
 | 핵심 목표 | 플랫폼 단일화, 계층별 SPOF 축소, 장애 대응 자동화, 시계열 데이터 확장성 확보 |
 
@@ -43,6 +44,13 @@ Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0 
 ![HA 및 장애조치 흐름](AD2.png)
 
 ```text
+Internal users
+    │ http://test-zabbix-yb.infra.kinxcdn.com/zabbix
+    ▼
+In-house traffic distribution appliance
+    ├─ Server 1 Nginx / PHP frontend
+    └─ Server 2 Nginx / PHP frontend
+
 Monitoring targets
     │ Agent 2 / SNMP / ICMP / HTTP / External Check
     ▼
@@ -81,8 +89,9 @@ PostgreSQL 16 + TimescaleDB
 - **Zabbix Server:** 두 서버가 같은 DB를 사용하며 한 노드만 Active로 동작합니다. Active 노드의 heartbeat가 끊기면 Standby가 자동 승격됩니다.
 - **Database:** Patroni가 etcd의 분산 상태를 기준으로 Primary를 선출하고 PostgreSQL Streaming Replication을 관리합니다.
 - **DB 연결:** 각 Zabbix Server의 Local HAProxy가 Patroni `/primary` API에서 HTTP 200을 반환하는 노드에만 DB 연결을 전달합니다.
-- **Proxy:** Zabbix 7.0 Proxy Group이 수집 부하를 분산하며 장애 Proxy의 호스트를 생존 Proxy로 재할당합니다.
-- **Frontend:** `$ZBX_SERVER`를 고정하지 않아 DB의 HA 노드 정보를 바탕으로 현재 Active Zabbix Server를 찾도록 구성합니다.
+- **Proxy:** Zabbix 7.0.29 Proxy Group이 수집 부하를 분산하며 장애 Proxy의 호스트를 생존 Proxy로 재할당합니다.
+- **Web frontend:** 사내 트래픽 분산 장비가 `http://test-zabbix-yb.infra.kinxcdn.com/zabbix` 요청을 Server1·Server2의 Nginx/PHP frontend로 전달합니다. 따라서 Keepalived VIP는 사용하지 않습니다.
+- **Frontend와 Zabbix Server HA 연동:** 두 frontend 모두 `$ZBX_SERVER`를 고정하지 않아 DB의 HA 노드 정보를 바탕으로 현재 Active Zabbix Server를 찾습니다. Web 요청 분산과 Zabbix Server Active/Standby 절체는 서로 다른 계층에서 처리됩니다.
 
 ## 주요 성과
 
@@ -114,12 +123,13 @@ zabbix-ha-infrastructure/
 │  ├─ DB1_patroni.yml             # DB1 Patroni 설정
 │  └─ DB2_patroni.yml             # DB2 Patroni 설정
 ├─ Zabbix/
-│  ├─ zabbix_server.conf          # Zabbix Server HA 설정
-│  ├─ zabbix_proxy.conf           # Active Proxy 설정
-│  ├─ zabbix_agent2.conf          # Agent 2 설정
+│  ├─ README.md                   # Zabbix HA 구성 및 상세 포팅 Runbook
+│  ├─ zabbix_server.conf          # Zabbix Server Native HA 설정
+│  ├─ zabbix_proxy.conf           # Active Proxy·SQLite 설정
+│  ├─ zabbix_agent2.conf          # Agent 2 Active/Passive 설정
 │  ├─ zabbix.conf.php             # Web frontend DB/HA 설정
-│  ├─ DNS_Check.sh                # DNS 검사 예제와 설치 메모
-│  └─ RTMP_Check.sh               # RTMP 검사 예제와 설치 메모
+│  ├─ DNS_Check.sh                # DNS External Check 예제와 설치 메모
+│  └─ RTMP_Check.sh               # RTMP External Check 예제와 설치 메모
 ├─ Load_Test/
 │  ├─ create_hosts.py             # Dummy host 생성
 │  ├─ add_triggers.py             # Trigger 생성
@@ -128,65 +138,177 @@ zabbix-ha-infrastructure/
 ├─ docs/                          # 발표·보고 자료
 ├─ AD1.png
 ├─ AD2.png
-└─ README.md
+└─ README.md                      # 프로젝트 전체 개요
 ```
 
-> `DNS_Check.sh`와 `RTMP_Check.sh`에는 현재 설치 절차와 실행 코드가 함께 들어 있습니다. 운영 서버의 ExternalScripts 디렉터리에 그대로 복사하지 말고, `#!/bin/bash`부터 검사 로직만 별도 `check_dns.sh`, `check_rtmp.sh`로 분리한 뒤 배포하세요.
+### Zabbix 배포 파일
+
+| 파일 | 배포 대상 | 용도 |
+| --- | --- | --- |
+| [`Zabbix/README.md`](Zabbix/README.md) | 구축·운영 담당자 | Zabbix HA 상세 구성과 포팅 Runbook |
+| [`Zabbix/zabbix_server.conf`](Zabbix/zabbix_server.conf) | Server1, Server2 | Local HAProxy DB 연결과 Zabbix Native HA 설정 |
+| [`Zabbix/zabbix_proxy.conf`](Zabbix/zabbix_proxy.conf) | Proxy1, Proxy2 | Active Proxy, SQLite, HA Server 순차 접속 설정 |
+| [`Zabbix/zabbix_agent2.conf`](Zabbix/zabbix_agent2.conf) | 6개 노드 및 모니터링 대상 | Passive 허용 대상과 Active 목적지 설정 |
+| [`Zabbix/zabbix.conf.php`](Zabbix/zabbix.conf.php) | Server1, Server2 | Web frontend의 PostgreSQL/HA 연결 설정 |
+| [`Zabbix/DNS_Check.sh`](Zabbix/DNS_Check.sh) | 검사를 실행하는 Proxy/Server | DNS External Check 예제와 설치 메모 |
+| [`Zabbix/RTMP_Check.sh`](Zabbix/RTMP_Check.sh) | 검사를 실행하는 Proxy/Server | RTMP External Check 예제와 설치 메모 |
+| [`patroni/DB1_patroni.yml`](patroni/DB1_patroni.yml) | DB1 | DB1 Patroni·etcd·PostgreSQL 설정 |
+| [`patroni/DB2_patroni.yml`](patroni/DB2_patroni.yml) | DB2 | DB2 Patroni·etcd·PostgreSQL 설정 |
+| [`HAproxy/haproxy.cfg`](HAproxy/haproxy.cfg) | Server1, Server2 | Patroni `/primary` 기반 DB 라우팅 |
+| [`Nginx/zabbix.conf`](Nginx/zabbix.conf) | Server1, Server2 | `/zabbix` Web frontend 설정 |
+
+> `DNS_Check.sh`와 `RTMP_Check.sh`는 실행 스크립트 앞뒤에 설치 명령이 포함된 Runbook 형식입니다. 파일 전체를 ExternalScripts 디렉터리에 복사하지 말고 `#!/bin/bash`부터 검사 로직까지만 각각 `check_dns.sh`, `check_rtmp.sh`로 분리해 배포합니다.
 
 ## 구축 및 포팅 매뉴얼
 
-이 절차는 Ubuntu 계열 Linux와 systemd를 기준으로 합니다. 패키지 저장소 등록 방식과 PHP socket 경로는 OS 및 Zabbix 패키지 버전에 맞게 조정해야 합니다.
+이 절차는 Ubuntu 24.04 계열 Linux와 systemd를 기준으로 하며, [`Zabbix/README.md`](Zabbix/README.md)의 최종 구성과 포팅 절차를 저장소 루트 기준 경로로 정리한 것입니다. 상세한 검증 범위, 시행착오에서 제외한 절차, 보안 주의사항은 해당 문서를 함께 확인합니다.
 
-### 0. 배포 전 준비
+### 포팅 전 준비
 
-먼저 다음 값을 환경별로 확정합니다.
+#### 1. 환경값
+
+다음 값을 먼저 확정하고 저장소의 `<MASKED_...>`를 환경별 값으로 교체합니다.
 
 ```text
-<DB1_IP>       <DB2_IP>
-<SERVER1_IP>   <SERVER2_IP>
-<PROXY1_IP>    <PROXY2_IP>
-<SERVICE_CIDR>
-<DB_PASSWORD>  <REPLICATION_PASSWORD>  <MONITOR_PASSWORD>
+<DB1_IP>        <DB2_IP>
+<SERVER1_IP>    <SERVER2_IP>
+<PROXY1_IP>     <PROXY2_IP>
+<SERVICE_CIDR>  <ADMIN_CIDR>
+
+<DB_PASSWORD>
+<POSTGRES_SUPERUSER_PASSWORD>
+<REPLICATION_PASSWORD>
+<MONITOR_PASSWORD>
 ```
 
-필수 포트는 최소 범위의 방화벽 정책으로 허용합니다.
+비밀번호를 셸 명령에 직접 넣으면 history와 프로세스 목록에 남을 수 있습니다. 배포 자동화의 secret store, 권한이 제한된 `.pgpass`, `psql`의 `\password` 등을 사용합니다.
+
+#### 2. 네트워크
 
 | Port | Source → Destination | 용도 |
 | ---: | --- | --- |
-| 80/443 | User → Web nodes | Zabbix UI |
-| 10050 | Server/Proxy → Agent | Passive check |
-| 10051 | Proxy/Agent → Zabbix Server | Active proxy/check 및 trapper |
-| 5432 | Zabbix Server → Local HAProxy, DB peer | PostgreSQL |
-| 8008 | HAProxy/DB admin network → Patroni | Patroni REST health check |
-| 2379 | Patroni nodes → etcd members | etcd client |
-| 2380 | etcd members ↔ etcd members | etcd peer |
+| 80/443 | 사용자/분산 장비 → Server | Web UI |
+| 10050/TCP | Server/Proxy → Agent | Passive Check |
+| 10051/TCP | Proxy/Active Agent → Server | Active Proxy·Agent, trapper |
+| 5432/TCP | Server → Local HAProxy, DB peer | PostgreSQL 및 복제 |
+| 8008/TCP | Server HAProxy → DB | Patroni REST health check |
+| 2379/TCP | Patroni → etcd members | etcd client |
+| 2380/TCP | etcd member ↔ member | etcd peer |
 
-배포 전 공통 확인:
+`2379`, `2380`, `8008`, `5432`, `10051`은 필요한 내부 노드와 서비스망으로 source를 제한합니다. 인터넷 전체에 열지 않습니다.
+
+##### 2-1. IXcloud 보안그룹 구성
+
+이 프로젝트는 **IXcloud**의 세 보안그룹을 DB, Proxy, Server 인스턴스에 각각 연결합니다. 아래 표는 실제 구축 규칙을 최소 권한 관점에서 다시 정리한 권장안입니다.
+
+```text
+DB1      192.168.20.10      Server1   192.168.20.23
+DB2      192.168.20.28      Server2   192.168.20.5
+Proxy1   192.168.20.8       Proxy2    192.168.20.15
+Admin    1.201.194.32/32    Service network 192.168.20.0/24
+```
+
+IXcloud 콘솔에서 하나의 규칙에 여러 source CIDR을 입력할 수 없다면 표의 쉼표로 나열한 주소마다 규칙을 한 개씩 생성합니다. Source Security Group 참조 기능을 사용할 수 있는 프로젝트라면 고정 IP `/32` 대신 상대 보안그룹을 지정하는 편이 인스턴스 교체에 유리합니다.
+
+> 이 정책은 일반적인 OpenStack 계열 Security Group처럼 연결 추적이 적용되는 **stateful 동작**을 전제로 합니다. 송신 요청에 대한 응답 패킷은 별도 수신 규칙 없이 허용됩니다. IXcloud 프로젝트의 실제 동작과 별도 Network ACL 적용 여부를 콘솔 또는 기술지원으로 확인한 후 운영에 반영하세요.
+
+###### `sg-zabbix-db`
+
+DB1과 DB2에 연결합니다.
+
+| 방향 | Ether | 프로토콜 | 포트 범위 | 트래픽 Source/Destination | 설명 |
+| --- | --- | --- | --- | --- | --- |
+| 수신 | IPv4 | TCP | 22 | `1.201.194.32/32` | 관리 NAT에서 SSH |
+| 수신 | IPv4 | TCP | 10050 | `192.168.20.23/32`, `192.168.20.5/32` | Server1·Server2의 DB Agent passive check |
+| 수신 | IPv4 | TCP | 2379 | `192.168.20.10/32`, `192.168.20.28/32`, `192.168.20.23/32` | Patroni와 etcd client 통신 |
+| 수신 | IPv4 | TCP | 2380 | `192.168.20.10/32`, `192.168.20.28/32`, `192.168.20.23/32` | 세 etcd member 간 peer 통신 |
+| 수신 | IPv4 | TCP | 8008 | `192.168.20.23/32`, `192.168.20.5/32` | 두 Local HAProxy의 Patroni `/primary` health check |
+| 수신 | IPv4 | TCP | 5432 | `192.168.20.23/32`, `192.168.20.5/32`, `192.168.20.10/32`, `192.168.20.28/32` | Zabbix Server DB 연결과 DB 간 Streaming Replication |
+| 송신 | IPv4 | ALL | ALL | `0.0.0.0/0` | 패키지 설치, DNS/NTP 및 HA 구성 통신을 포함한 현재 운영 정책 |
+
+정리한 내용:
+
+- etcd `2379/2380`과 Patroni `8008`의 source를 `192.168.20.0/24` 전체에서 실제 구성 노드로 축소했습니다.
+- PostgreSQL `5432`의 중복 규칙은 하나의 논리 항목으로 합쳤습니다. IXcloud 콘솔에는 source별 `/32` 규칙으로 등록합니다.
+- `IPv4 ALL` 송신이 Metadata IP를 포함하므로 `TCP/80 → 169.254.169.254/32` 규칙은 중복이라 별도로 두지 않습니다.
+- IPv6 주소와 서비스가 없으므로 `IPv6 ALL` 송신은 제거합니다. IPv6를 활성화할 때 필요한 목적지 기준으로 다시 설계합니다.
+
+###### `sg-zabbix-proxy`
+
+Proxy1과 Proxy2에 연결합니다.
+
+| 방향 | Ether | 프로토콜 | 포트 범위 | 트래픽 Source/Destination | 설명 |
+| --- | --- | --- | --- | --- | --- |
+| 수신 | IPv4 | TCP | 22 | `1.201.194.32/32` | 관리 NAT에서 SSH |
+| 수신 | IPv4 | TCP | 10050 | `192.168.20.23/32`, `192.168.20.5/32` | Server1·Server2의 Proxy Agent passive check |
+| 수신 | IPv4 | TCP | 10051 | `<MONITORED_TARGET_CIDRS>` | Agent active check와 `zabbix_sender` 데이터 수신 |
+| 수신 | IPv4 | TCP | 10051 | `<LOAD_GENERATOR_CIDRS>` | 부하 테스트 기간에만 추가하고 테스트 후 삭제 |
+| 송신 | IPv4 | ALL | ALL | `0.0.0.0/0` | Zabbix Server 연결과 SNMP·ICMP·HTTP·DNS·RTMP 검사 대상 접근 |
+
+`10051/TCP`의 source를 `ALL`로 공개하면 임의의 시스템이 Proxy trapper/active check 포트에 접근할 수 있습니다. 실제 Agent가 위치한 서비스 CIDR, 지점망, VPN 대역 또는 별도 모니터링 Security Group으로 제한합니다. 인터넷상의 동적 대상 때문에 제한이 불가능하다면 TLS PSK/certificate와 host firewall을 함께 적용하고 접근 로그를 모니터링합니다.
+
+Active Proxy는 Server로 먼저 연결하므로 Server가 Proxy의 `10051`에 접속하기 위한 별도 수신 규칙은 필요하지 않습니다. Passive Proxy로 변경할 경우에만 Server1·Server2를 source로 하는 `10051/TCP` 규칙을 추가합니다.
+
+###### `sg-zabbix-server`
+
+Server1과 Server2에 연결합니다.
+
+| 방향 | Ether | 프로토콜 | 포트 범위 | 트래픽 Source/Destination | 설명 |
+| --- | --- | --- | --- | --- | --- |
+| 수신 | IPv4 | TCP | 22 | `1.201.194.32/32` | 관리 NAT에서 SSH |
+| 수신 | IPv4 | TCP | 80 | `1.201.194.30/32`, `1.201.194.32/32`, `192.168.20.0/24` | 사내 NAT와 내부망의 Zabbix Web 접속 |
+| 수신 | IPv4 | TCP | 10050 | `192.168.20.23/32`, `192.168.20.5/32` | 두 Server 노드의 Agent passive check |
+| 수신 | IPv4 | TCP | 10051 | `192.168.20.8/32`, `192.168.20.15/32`, `192.168.20.23/32`, `192.168.20.5/32` | Proxy1·Proxy2 및 Server Agent의 Active Server 연결 |
+| 수신 | IPv4 | TCP | 2379 | `192.168.20.10/32`, `192.168.20.28/32`, `192.168.20.23/32` | Server1의 etcd client endpoint |
+| 수신 | IPv4 | TCP | 2380 | `192.168.20.10/32`, `192.168.20.28/32`, `192.168.20.23/32` | Server1과 DB1·DB2 etcd peer 통신 |
+| 송신 | IPv4 | ALL | ALL | `0.0.0.0/0` | DB·Proxy·Agent 연결, 외부검사, 알림, 패키지 설치와 DNS/NTP |
+
+`10051/TCP`를 통해 Server에 직접 접속하는 별도 Agent 또는 sender가 있다면 해당 source CIDR만 추가합니다. 모든 모니터링 대상을 Proxy Group으로 전환했다면 Proxy1·Proxy2만 허용하고 Server Agent가 실제로 active mode를 사용할 때만 Server1·Server2 source를 유지합니다.
+
+기존 Server 보안그룹의 여러 외부 IP별 ICMP 수신 규칙은 제거합니다. Zabbix Server가 외부 대상으로 ICMP echo request를 보내는 구조에서는 stateful SG가 reply를 자동 허용하므로 대상별 수신 규칙이 필요하지 않습니다. 반대로 외부 모니터링 시스템이 Zabbix Server 자체를 ping해야 한다면 그 모니터링 시스템의 source CIDR만 별도 허용합니다.
+
+Web UI는 운영 시 HTTPS를 권장합니다. 인증서를 적용한 뒤 동일 source에 `443/TCP`를 허용하고, `80/TCP`는 HTTPS redirect 용도로만 유지하거나 폐쇄합니다.
+
+###### 공통 Egress 정책
+
+현재 구성은 External Check, Slack/Webhook, package repository 등 목적지가 다양하므로 세 보안그룹 모두 `IPv4 ALL → 0.0.0.0/0` 송신을 유지하는 운영 우선 정책입니다. 따라서 다음 규칙은 중복 또는 미사용으로 제외합니다.
+
+- `TCP/80 → 169.254.169.254/32`: IPv4 ALL 송신에 이미 포함됨
+- `IPv6 ALL → ALL`: 현재 IPv6 주소와 서비스가 없으면 불필요
+- ICMP reply용 개별 수신 규칙: stateful 연결 추적에서 불필요
+
+더 엄격한 egress 통제가 필요하면 `IPv4 ALL`을 제거한 뒤 다음 목적지를 명시적으로 허용해야 합니다.
+
+- IXcloud Metadata: `169.254.169.254/32 TCP/80`
+- 내부 DNS: `TCP/UDP 53`, NTP: `UDP 123`
+- Ubuntu·Zabbix·PostgreSQL·TimescaleDB 저장소: `TCP 80/443`
+- DB/etcd/Patroni/Zabbix 통신: 위 역할별 내부 IP와 포트
+- Slack/Webhook, SMTP, DNS·RTMP·HTTP 검사 대상: 실제 목적지와 포트
+
+#### 3. 공통 사전 점검
 
 ```bash
 timedatectl status
 hostnamectl
-getent hosts vm-zabbix-db1 vm-zabbix-db2 vm-zabbix-server1 vm-zabbix-server2
+getent hosts <DB1_HOST> <DB2_HOST> <SERVER1_HOST> <SERVER2_HOST>
+ip -br address
 ```
 
-모든 노드의 시간 동기화와 정방향 이름 해석이 정상이어야 합니다.
+모든 노드의 시간 동기화와 이름 해석이 정상이어야 합니다. 기존 환경을 포팅한다면 다음 항목을 별도 백업합니다.
 
-### 0-1. Zabbix 7.0 공식 패키지 설치
+- 기존 Zabbix DB와 VM/Snapshot
+- Zabbix Template, Host Group, Host, Action, Media Type export
+- `/etc/zabbix`, Nginx, PHP, HAProxy 설정
+- External Check와 사용자 매크로
+- Nagios Host/Service 정의 및 알림 임계치
 
-현재 저장소의 Nginx·PHP 경로와 구축 환경에 맞춰 **Ubuntu 24.04 LTS / Zabbix 7.0 LTS / PostgreSQL / Nginx** 조합을 기준으로 합니다. Ubuntu 기본 저장소의 Zabbix 패키지는 버전이 오래되거나 필요한 기능이 빠질 수 있으므로 [Zabbix 공식 저장소](https://repo.zabbix.com/zabbix/7.0/ubuntu/)를 사용합니다.
+### 포팅 순서
 
-먼저 각 노드의 OS와 CPU architecture를 확인합니다.
+권장 순서는 `공통 저장소 → etcd → DB/Patroni → DB 초기화 → HAProxy → Zabbix Server/Web → Proxy → Agent 2/External Check → UI 이관`입니다.
 
-```bash
-. /etc/os-release
-printf 'OS=%s VERSION=%s ARCH=%s\n' "$ID" "$VERSION_ID" "$(dpkg --print-architecture)"
-```
+#### 1. Zabbix 공식 저장소 등록
 
-아래 저장소 패키지는 Ubuntu 24.04 `amd64` 기준입니다. Ubuntu 20.04/22.04 또는 `arm64`를 사용한다면 파일명을 임의로 바꾸지 말고 [Zabbix 다운로드 페이지](https://www.zabbix.com/download?zabbix=7.0)에서 OS와 architecture에 맞는 7.0 LTS 저장소를 선택합니다.
-
-#### 모든 Zabbix 구성 노드에 공식 저장소 등록
-
-Server, Proxy, DB와 Agent 2를 설치할 모든 모니터링 대상에서 실행합니다.
+Ubuntu 24.04용 Zabbix 7.0 LTS 저장소를 모든 Zabbix 구성 노드에 등록한 뒤 Candidate 버전을 확인합니다.
 
 ```bash
 sudo apt update
@@ -196,261 +318,233 @@ wget -O /tmp/zabbix-release.deb \
   https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu24.04_all.deb
 sudo dpkg -i /tmp/zabbix-release.deb
 sudo apt update
-rm -f /tmp/zabbix-release.deb
 
 apt-cache policy zabbix-server-pgsql zabbix-proxy-sqlite3 zabbix-agent2
+apt-cache madison zabbix-server-pgsql
 ```
 
-`apt-cache policy`의 Candidate가 `repo.zabbix.com/zabbix/7.0`에서 제공되는지 확인한 뒤 역할별 패키지를 설치합니다.
+이 프로젝트의 목표 패치는 `1:7.0.29-1+ubuntu24.04`입니다. 저장소에서 제공되는지 확인한 뒤 Server, Proxy, Agent, SQL scripts를 가능한 한 같은 패치 버전으로 설치합니다.
 
-#### Server1·Server2: Zabbix Server, Web frontend, Agent 2
-
-두 Zabbix Server 노드에 동일하게 설치합니다.
-
-```bash
-sudo apt install -y \
-  zabbix-server-pgsql \
-  zabbix-frontend-php \
-  php8.3-pgsql \
-  zabbix-nginx-conf \
-  zabbix-sql-scripts \
-  zabbix-agent2 \
-  zabbix-get \
-  zabbix-sender \
-  fping
-
-zabbix_server --version
-zabbix_agent2 --version
-nginx -v
-php -v
-```
-
-패키지 설치 직후에는 아직 DB와 HA node 값이 설정되지 않았으므로 Zabbix Server를 시작하지 않습니다. 자동으로 시작되었다면 설정 배포 단계까지 중지합니다.
-
-```bash
-sudo systemctl stop zabbix-server
-```
-
-각 패키지의 역할은 다음과 같습니다.
-
-| 패키지 | 역할 |
-| --- | --- |
-| `zabbix-server-pgsql` | PostgreSQL backend용 Zabbix Server |
-| `zabbix-frontend-php` | Zabbix Web frontend PHP 파일 |
-| `php8.3-pgsql` | PHP에서 PostgreSQL에 접속하기 위한 확장 |
-| `zabbix-nginx-conf` | Nginx·PHP-FPM용 기본 설정과 socket 구성 |
-| `zabbix-sql-scripts` | Server schema와 TimescaleDB schema |
-| `zabbix-agent2` | Server 노드 자체 모니터링 |
-| `zabbix-get`, `zabbix-sender` | Agent 통신 점검과 trapper 부하 테스트 도구 |
-
-#### Proxy1·Proxy2: SQLite 기반 Zabbix Proxy와 Agent 2
-
-두 Proxy 노드에 동일하게 설치합니다.
-
-```bash
-sudo apt install -y \
-  zabbix-proxy-sqlite3 \
-  zabbix-sql-scripts \
-  zabbix-agent2 \
-  zabbix-get \
-  zabbix-sender \
-  fping \
-  dnsutils \
-  rtmpdump
-
-zabbix_proxy --version
-zabbix_agent2 --version
-sudo systemctl stop zabbix-proxy
-```
-
-`zabbix-proxy-sqlite3`는 각 Proxy가 사용하는 로컬 SQLite backend 패키지입니다. Server DB와 Proxy DB를 공유하지 않습니다. `dnsutils`와 `rtmpdump`는 이 프로젝트의 DNS·RTMP External Check에 필요합니다.
-
-#### DB1·DB2: Agent 2와 PostgreSQL plugin
-
-DB 노드 자체의 OS와 PostgreSQL 상태를 수집하기 위해 설치합니다.
-
-```bash
-sudo apt install -y \
-  zabbix-agent2 \
-  zabbix-agent2-plugin-postgresql \
-  zabbix-get
-
-zabbix_agent2 --version
-dpkg -l | grep -E '^ii\s+zabbix-(agent2|agent2-plugin-postgresql)'
-```
-
-#### 나머지 Linux 모니터링 대상: Agent 2
-
-```bash
-sudo apt install -y zabbix-agent2
-sudo systemctl stop zabbix-agent2
-zabbix_agent2 --version
-```
-
-Agent는 [7. Agent 2 연결](#7-zabbix-agent-2-연결)의 `Server`, `ServerActive`, `Hostname`을 설정한 후 시작합니다.
-
-#### 설치 결과 확인
-
-Server 노드에서 다음 패키지가 확인되어야 합니다.
-
-```bash
-dpkg -l | grep -E '^ii\s+(zabbix|php8.3-pgsql)'
-ls -l /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz
-ls -l /usr/share/zabbix-sql-scripts/postgresql/timescaledb/schema.sql
-```
-
-서비스는 아직 모두 실행될 필요가 없습니다. 이후 단계에서 DB와 설정 파일을 먼저 준비하고 다음 순서로 시작합니다.
-
-```text
-etcd → Patroni/PostgreSQL → HAProxy → Zabbix Server/Web → Proxy → Agent 2
-```
-
-### 1. etcd 3-node quorum 구성
+#### 2. etcd 3-node quorum 구성
 
 DB1, DB2, Server1에 etcd를 설치합니다.
 
 ```bash
-sudo apt update
 sudo apt install -y etcd-server etcd-client
+sudo systemctl stop etcd
 ```
 
-각 노드의 `/etc/default/etcd`에 고유한 `ETCD_NAME`, peer/client listen 주소를 지정하고, 세 노드 모두 동일한 초기 멤버 목록과 cluster token을 사용합니다.
+각 노드의 `/etc/default/etcd`에 고유 이름과 주소를 설정합니다. 아래 예시는 DB1 기준이며 DB2와 Server1에서는 이름·로컬 주소만 바꿉니다.
 
-```ini
-ETCD_INITIAL_CLUSTER="db1=http://<DB1_IP>:2380,db2=http://<DB2_IP>:2380,server1=http://<SERVER1_IP>:2380"
-ETCD_INITIAL_CLUSTER_STATE="new"
-ETCD_INITIAL_CLUSTER_TOKEN="etcd-zabbix-cluster"
+```bash
+ETCD_NAME=db1
+ETCD_DATA_DIR=/var/lib/etcd/db1.etcd
+ETCD_LISTEN_PEER_URLS=http://<DB1_IP>:2380
+ETCD_LISTEN_CLIENT_URLS=http://127.0.0.1:2379,http://<DB1_IP>:2379
+ETCD_INITIAL_ADVERTISE_PEER_URLS=http://<DB1_IP>:2380
+ETCD_ADVERTISE_CLIENT_URLS=http://<DB1_IP>:2379
+ETCD_INITIAL_CLUSTER=db1=http://<DB1_IP>:2380,db2=http://<DB2_IP>:2380,server1=http://<SERVER1_IP>:2380
+ETCD_INITIAL_CLUSTER_TOKEN=zabbix-ha-etcd
+ETCD_INITIAL_CLUSTER_STATE=new
 ```
 
-노드별 예시는 다음 원칙을 따릅니다.
-
-```ini
-ETCD_NAME="db1"
-ETCD_DATA_DIR="/var/lib/etcd/db1.etcd"
-ETCD_LISTEN_PEER_URLS="http://<DB1_IP>:2380"
-ETCD_LISTEN_CLIENT_URLS="http://<DB1_IP>:2379,http://127.0.0.1:2379"
-ETCD_INITIAL_ADVERTISE_PEER_URLS="http://<DB1_IP>:2380"
-ETCD_ADVERTISE_CLIENT_URLS="http://<DB1_IP>:2379"
-```
+세 노드 설정을 모두 배포한 뒤 서비스를 시작합니다.
 
 ```bash
 sudo systemctl enable --now etcd
-etcdctl member list
-etcdctl endpoint health --cluster
+
+export ETCDCTL_API=3
+etcdctl \
+  --endpoints=http://<DB1_IP>:2379,http://<DB2_IP>:2379,http://<SERVER1_IP>:2379 \
+  endpoint health
+etcdctl \
+  --endpoints=http://<DB1_IP>:2379,http://<DB2_IP>:2379,http://<SERVER1_IP>:2379 \
+  endpoint status --write-out=table
 ```
 
-기존 클러스터에 노드를 다시 붙이는 경우 `ETCD_INITIAL_CLUSTER_STATE="existing"` 여부와 기존 member 상태를 먼저 확인해야 합니다. 운영 중인 etcd data directory를 임의로 삭제하지 마세요.
+기존 etcd 클러스터에 새 노드를 포팅하는 경우 `ETCD_INITIAL_CLUSTER_STATE=existing`을 사용하고 `etcdctl member add` 결과의 설정을 따릅니다. 기존 data directory나 DCS prefix를 임의로 삭제하지 않습니다.
 
-### 2. PostgreSQL 16, TimescaleDB, Patroni 구성
+#### 3. PostgreSQL 16, TimescaleDB, Patroni 설치
 
-DB1과 DB2에 OS 버전에 맞는 PostgreSQL·TimescaleDB 공식 저장소를 등록한 후 필요한 패키지를 설치합니다.
+DB1과 DB2에 PostgreSQL 16·TimescaleDB 저장소를 OS에 맞게 등록한 후 설치합니다.
 
 ```bash
 sudo apt update
-sudo apt install -y postgresql-16 postgresql-client-16 \
-  timescaledb-2-postgresql-16 patroni python3-psycopg2
+sudo apt install -y \
+  postgresql-16 postgresql-client-16 \
+  timescaledb-2-postgresql-16 \
+  patroni python3-psycopg2
+
 sudo systemctl disable --now postgresql
 ```
 
-Patroni가 PostgreSQL 프로세스를 직접 관리하므로 기본 `postgresql.service`는 중지합니다. 저장소의 설정 파일을 각 DB 노드에 복사하고 마스킹 값을 교체합니다.
+Patroni가 PostgreSQL 프로세스를 직접 소유하므로 기본 `postgresql.service`를 다시 활성화하지 않습니다. `timescaledb-tune`이 `/etc/postgresql/16/main/postgresql.conf`에 쓴 값은 Patroni DCS에 자동 반영되지 않으므로 이 매뉴얼에서는 자동 실행하지 않습니다.
+
+##### Greenfield data directory 준비
+
+패키지 설치로 만들어진 기본 cluster가 실제 데이터를 포함하지 않는 새 구축 대상인지 확인합니다.
 
 ```bash
-sudo install -o postgres -g postgres -m 0640 patroni/DB1_patroni.yml /etc/patroni/patroni.yml
-# DB2에서는 DB2_patroni.yml 사용
-sudo ln -sfn /etc/patroni/patroni.yml /etc/patroni/config.yml
-sudo chown -R postgres:postgres /etc/patroni /var/lib/postgresql
+sudo -u postgres pg_controldata /var/lib/postgresql/16/main | head
+sudo du -sh /var/lib/postgresql/16/main
 ```
 
-설정 핵심값:
-
-- 두 노드의 `scope`, `namespace`, etcd hosts는 동일해야 합니다.
-- `name`, `restapi.listen`, `connect_address`는 노드별로 고유해야 합니다.
-- `shared_preload_libraries: timescaledb`와 `data-checksums`를 유지합니다.
-- `pg_hba`의 `<MASKED_SUBNET>`은 필요한 서비스망으로 최소화합니다.
-- `restapi`와 etcd에 TLS 또는 인증을 적용하지 않는 경우 방화벽으로 관리망 접근만 허용합니다.
-
-> **데이터 삭제 주의:** Patroni 최초 bootstrap을 위해 기존 PostgreSQL data directory를 비워야 할 수 있습니다. `rm -rf /var/lib/postgresql/16/main`은 해당 경로가 새 구축 대상이며 백업과 복구 절차가 확인된 경우에만 실행하세요. 운영 DB 또는 경로가 불명확한 환경에서는 실행하면 안 됩니다.
-
-DB1을 먼저 시작하고 Leader 선출을 확인한 뒤 DB2를 시작합니다.
+Patroni bootstrap에는 비어 있는 `data_dir`가 필요합니다. 기존 운영 데이터가 있다면 삭제하지 말고 DB 백업·복구 또는 별도 data directory를 설계합니다. 새 cluster임이 확인된 경우에도 기존 디렉터리를 바로 삭제하지 말고 timestamp를 붙여 보관한 뒤 빈 디렉터리를 준비합니다.
 
 ```bash
+sudo mv /var/lib/postgresql/16/main /var/lib/postgresql/16/main.pre-patroni
+sudo install -d -o postgres -g postgres -m 0700 /var/lib/postgresql/16/main
+```
+
+##### Patroni 설정 배포
+
+DB1과 DB2에 각각의 파일을 배포하고 placeholder를 교체합니다.
+
+```bash
+# DB1
+sudo install -d -o postgres -g postgres -m 0750 /etc/patroni
+sudo install -o postgres -g postgres -m 0640 \
+  patroni/DB1_patroni.yml /etc/patroni/patroni.yml
+
+# DB2에서는 DB2_patroni.yml 사용
+```
+
+배포 전에 다음 항목을 반드시 확인합니다.
+
+- 두 파일의 `scope`와 `namespace`는 동일하고 `name`은 각각 `db1`, `db2`
+- `etcd3.hosts`에 DB1, DB2, Server1의 세 endpoint가 존재
+- `restapi.listen`, `connect_address`, `postgresql.connect_address`는 해당 노드 IP
+- `pg_hba`의 subnet은 실제 서비스망으로 제한
+- replication, superuser, Zabbix 계정의 비밀번호 교체
+- `shared_preload_libraries: 'timescaledb'` 유지
+
+배포판의 Patroni unit이 `/etc/patroni/config.yml`을 요구한다면 현재 표준 파일을 가리키는 심볼릭 링크를 만듭니다.
+
+```bash
+systemctl cat patroni | grep -E 'ExecStart|Environment'
+sudo ln -sfn /etc/patroni/patroni.yml /etc/patroni/config.yml
+```
+
+DB1을 먼저 시작하고 Leader가 된 것을 확인한 다음 DB2를 시작합니다.
+
+```bash
+# DB1
 sudo systemctl enable --now patroni
 sudo patronictl -c /etc/patroni/patroni.yml list
-curl -fsS http://<DB1_IP>:8008/primary
-curl -fsS http://<DB2_IP>:8008/replica
+
+# DB1이 Leader가 된 뒤 DB2
+sudo systemctl enable --now patroni
+sudo patronictl -c /etc/patroni/patroni.yml list
 ```
 
-`bootstrap.dcs`와 `bootstrap.pg_hba`는 최초 cluster bootstrap에 사용됩니다. 이미 생성된 클러스터의 동적 설정은 파일만 수정하지 말고 `patronictl edit-config`로 변경하세요.
+정상 상태는 DB 한 대가 `Leader`, 다른 한 대가 `Replica`이며 Replica의 lag가 수렴하는 상태입니다.
 
-### 3. Zabbix DB와 TimescaleDB schema 생성
+#### 4. Zabbix DB와 TimescaleDB schema 초기화
 
-Primary DB에서 계정과 DB를 생성합니다. 예시 비밀번호를 그대로 사용하지 마세요.
+DB1/DB2 중 현재 Patroni Leader에서만 계정과 DB를 생성합니다. 아래 SQL의 비밀번호는 실제 secret 관리 방식에 맞게 입력합니다.
 
 ```sql
 CREATE USER zabbix WITH PASSWORD '<DB_PASSWORD>';
 CREATE DATABASE zabbix OWNER zabbix;
-\c zabbix
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
 CREATE USER zbx_monitor WITH PASSWORD '<MONITOR_PASSWORD>';
 GRANT pg_read_all_stats TO zbx_monitor;
 ```
 
-Zabbix Server 패키지가 설치된 노드에서 schema를 주입합니다.
-
 ```bash
-zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz \
-  | PGPASSWORD='<DB_PASSWORD>' psql -h <DB1_IP> -U zabbix -d zabbix
-
-cat /usr/share/zabbix-sql-scripts/postgresql/timescaledb/schema.sql \
-  | PGPASSWORD='<DB_PASSWORD>' psql -h <DB1_IP> -U zabbix -d zabbix
+sudo -u postgres psql -d zabbix \
+  -c 'CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;'
 ```
 
-비밀번호에 `!`, `$`, 공백 등의 문자가 있으면 shell history expansion과 quoting에 주의합니다. 가능하면 `.pgpass`, password file, secret manager를 사용하세요.
-
-### 4. Local HAProxy로 Primary DB 라우팅
-
-Server1과 Server2에 HAProxy를 설치하고 저장소 설정을 배포합니다.
+Server1에 `zabbix-sql-scripts`를 설치한 뒤 schema는 한 번만 import합니다. HAProxy가 아직 준비되지 않았다면 현재 Leader 주소로 연결하고, 준비됐다면 `127.0.0.1`을 사용합니다.
 
 ```bash
-sudo apt install -y haproxy
-sudo install -o root -g root -m 0644 HAproxy/haproxy.cfg /etc/haproxy/haproxy.cfg
-sudoedit /etc/haproxy/haproxy.cfg   # DB1/DB2 주소 교체
+sudo apt install -y zabbix-sql-scripts postgresql-client-16
+
+zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | \
+  psql -h <CURRENT_PRIMARY_IP> -U zabbix -d zabbix
+
+psql -h <CURRENT_PRIMARY_IP> -U zabbix -d zabbix \
+  -f /usr/share/zabbix-sql-scripts/postgresql/timescaledb/schema.sql
+```
+
+```bash
+sudo -u postgres psql -d zabbix \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname='timescaledb';"
+sudo -u postgres psql -d zabbix \
+  -c 'SELECT hypertable_name FROM timescaledb_information.hypertables;'
+```
+
+#### 5. Local HAProxy 구성
+
+Server1과 Server2에 동일하게 설치하고 설정합니다.
+
+```bash
+sudo apt install -y haproxy postgresql-client-16
+sudo install -o root -g root -m 0644 \
+  HAproxy/haproxy.cfg /etc/haproxy/haproxy.cfg
+```
+
+`db1`, `db2` backend의 주소와 Patroni port `8008`을 교체한 뒤 검증합니다.
+
+```bash
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 sudo systemctl enable --now haproxy
+
+curl -i http://<DB1_IP>:8008/primary
+curl -i http://<DB2_IP>:8008/primary
+psql -h 127.0.0.1 -U zabbix -d zabbix -c 'SELECT pg_is_in_recovery();'
 ```
 
-HAProxy는 `127.0.0.1:5432`에서 대기하고, Patroni의 `/primary`가 HTTP 200인 DB에만 연결을 전달합니다.
+두 Patroni endpoint 중 현재 Primary만 `/primary`에 200을 반환해야 하며, Local HAProxy를 통한 쿼리는 `false`를 반환해야 합니다.
+
+#### 6. Zabbix Server와 Web Frontend 구성
+
+Server1과 Server2에 설치합니다.
 
 ```bash
-PGPASSWORD='<DB_PASSWORD>' psql -h 127.0.0.1 -U zabbix -d zabbix \
-  -c 'SELECT inet_server_addr(), pg_is_in_recovery();'
+ZBX_VERSION='1:7.0.29-1+ubuntu24.04'
+
+sudo apt install -y \
+  zabbix-server-pgsql="$ZBX_VERSION" \
+  zabbix-frontend-php="$ZBX_VERSION" \
+  zabbix-nginx-conf="$ZBX_VERSION" \
+  zabbix-sql-scripts="$ZBX_VERSION" \
+  zabbix-agent2="$ZBX_VERSION" \
+  zabbix-get="$ZBX_VERSION" \
+  zabbix-sender="$ZBX_VERSION" \
+  php8.3-pgsql fping
+
+sudo systemctl stop zabbix-server
 ```
 
-`pg_is_in_recovery()` 결과가 `f`여야 쓰기 가능한 Primary DB로 연결된 것입니다.
+Candidate에 해당 버전이 없다면 다른 release의 파일명을 추측하지 말고 `apt-cache madison` 결과에서 모든 역할에 공통으로 제공되는 7.0 LTS 패치를 선택합니다.
 
-### 5. Zabbix Server Native HA와 Web frontend 구성
-
-Server1과 Server2에 Zabbix 7.0 Server, SQL scripts, Nginx, PHP-FPM을 설치한 뒤 설정을 배포합니다.
+설정을 배포합니다.
 
 ```bash
-sudo install -o root -g zabbix -m 0640 Zabbix/zabbix_server.conf /etc/zabbix/zabbix_server.conf
-sudo install -o root -g root -m 0644 Nginx/zabbix.conf /etc/nginx/conf.d/zabbix.conf
-sudo install -o root -g www-data -m 0640 Zabbix/zabbix.conf.php /etc/zabbix/web/zabbix.conf.php
+sudo install -o root -g zabbix -m 0640 \
+  Zabbix/zabbix_server.conf /etc/zabbix/zabbix_server.conf
+sudo install -o www-data -g www-data -m 0640 \
+  Zabbix/zabbix.conf.php /etc/zabbix/web/zabbix.conf.php
+sudo install -o root -g root -m 0644 \
+  Nginx/zabbix.conf /etc/nginx/conf.d/zabbix.conf
+sudo rm -f /etc/nginx/sites-enabled/default
 ```
 
-각 서버에서 반드시 다르게 설정할 값:
+노드별로 다음 값을 다르게 지정합니다.
 
 ```ini
 # Server1
-HANodeName=zabbix-server1
+HANodeName=server1
 NodeAddress=<SERVER1_IP>:10051
 
 # Server2
-HANodeName=zabbix-server2
+HANodeName=server2
 NodeAddress=<SERVER2_IP>:10051
 ```
 
-공통 DB 연결은 Local HAProxy를 사용합니다.
+공통 설정은 Local HAProxy를 바라봅니다.
 
 ```ini
 DBHost=127.0.0.1
@@ -460,152 +554,156 @@ DBUser=zabbix
 DBPassword=<DB_PASSWORD>
 ```
 
-Frontend의 `$ZBX_SERVER`와 `$ZBX_SERVER_PORT`는 지정하지 않습니다. 그래야 DB의 HA 노드 정보로 현재 Active Server를 자동 탐색할 수 있습니다. 저장소의 `$DB['PORT']='0'`은 PostgreSQL 기본 포트를 의미하며, 명시하려면 `'5432'`로 바꿀 수 있습니다.
+현재 Frontend 설정은 `$ZBX_SERVER`를 고정하지 않습니다. 두 Frontend가 DB의 HA node 정보를 통해 현재 Active Zabbix Server를 찾도록 유지합니다.
 
 ```bash
 sudo nginx -t
-sudo php -l /etc/zabbix/web/zabbix.conf.php
 sudo zabbix_server -T -c /etc/zabbix/zabbix_server.conf
-sudo systemctl restart haproxy php8.3-fpm nginx zabbix-server
+sudo systemctl enable --now php8.3-fpm nginx zabbix-server zabbix-agent2
+
 sudo zabbix_server -R ha_status
+sudo journalctl -u zabbix-server -n 100 --no-pager
 ```
 
-두 서버가 동일한 DB를 사용하되 서로 다른 `HANodeName`과 `NodeAddress`를 갖는지 확인합니다.
+HA 상태에서 한 Server만 Active이고 다른 Server는 Standby여야 합니다.
 
-### 6. Zabbix Proxy Group 구성
+#### 7. Active Proxy와 Proxy Group 구성
 
-Proxy1과 Proxy2에 Zabbix Proxy(SQLite)를 설치하고 설정을 배포합니다.
+Proxy1과 Proxy2에 설치합니다.
 
 ```bash
-sudo install -o root -g zabbix -m 0640 Zabbix/zabbix_proxy.conf /etc/zabbix/zabbix_proxy.conf
-sudoedit /etc/zabbix/zabbix_proxy.conf
-sudo zabbix_proxy -T -c /etc/zabbix/zabbix_proxy.conf
-sudo systemctl enable --now zabbix-proxy
+ZBX_VERSION='1:7.0.29-1+ubuntu24.04'
+
+sudo apt install -y \
+  zabbix-proxy-sqlite3="$ZBX_VERSION" \
+  zabbix-agent2="$ZBX_VERSION" \
+  zabbix-get="$ZBX_VERSION" \
+  zabbix-sender="$ZBX_VERSION" \
+  fping dnsutils rtmpdump
+
+sudo install -d -o zabbix -g zabbix -m 0755 \
+  /var/log/zabbix /var/lib/zabbix /run/zabbix
+sudo install -o root -g zabbix -m 0640 \
+  Zabbix/zabbix_proxy.conf /etc/zabbix/zabbix_proxy.conf
 ```
 
-Active Proxy가 동일 Zabbix Server HA cluster를 바라볼 때 서버 주소는 **세미콜론**으로 구분합니다.
+Proxy별 `Hostname`을 UI에 등록할 이름과 정확히 일치시킵니다.
 
 ```ini
 ProxyMode=0
 Server=<SERVER1_IP>;<SERVER2_IP>
-Hostname=zabbix-proxy1  # Proxy2에서는 zabbix-proxy2
+Hostname=proxy1  # Proxy2는 proxy2
 DBName=/var/lib/zabbix/zabbix_proxy.db
-ProxyBufferMode=hybrid
-ProxyMemoryBufferSize=16M
-```
 
-Web UI에서 다음 순서로 등록합니다.
-
-1. `Administration → Proxy groups → Create proxy group`
-2. Group name을 `ixcloud-proxy-group`으로 지정
-3. Failover period `1m`, Minimum online proxies `1` 설정
-4. Proxy1과 Proxy2를 각각 생성하고 동일 그룹에 할당
-
-2,000 hosts / 5,000 NVPS 테스트에서는 Proxy configuration cache가 부족해질 수 있었습니다. 환경 규모에 맞춰 별도 include 파일로 조정합니다.
-
-```ini
-# /etc/zabbix/zabbix_proxy.d/10-capacity.conf
+# 5,000 NVPS 테스트 규모를 재현할 때 적용 후 메모리 재검증
 CacheSize=256M
 ```
 
-메모리 값은 테스트 결과와 호스트·아이템 수를 기준으로 산정하고 변경 후 프로세스 busy, queue, cache 사용률을 다시 확인하세요.
+Active Proxy의 `Server`에서 세미콜론은 HA node를 순서대로 시도하는 구분자입니다. 이 프로젝트의 Proxy 연동 실패는 잘못된 구분자를 최종적으로 수정해 해결했습니다.
 
-### 7. Zabbix Agent 2 연결
+```bash
+sudo zabbix_proxy -T -c /etc/zabbix/zabbix_proxy.conf
+sudo systemctl enable --now zabbix-proxy zabbix-agent2
+sudo journalctl -u zabbix-proxy -n 100 --no-pager
+```
 
-Agent 설정에서 Passive check 허용 대상은 쉼표로, 동일 HA cluster 또는 Proxy Group의 Active check 대상은 세미콜론으로 구분합니다.
+Web UI에서 다음 순서로 구성합니다.
+
+1. Proxy1과 Proxy2를 `Active` 모드로 등록합니다.
+2. 두 Proxy를 같은 Proxy Group에 넣습니다.
+3. Failover period를 운영 요구사항에 맞게 정합니다. 테스트 당시 기본 1분 설정에서 전체 이관은 약 70.77초였습니다.
+4. 일부 Host Group만 먼저 Proxy Group에 할당해 수집을 검증합니다.
+
+SQLite DB는 새 Proxy가 처음 시작할 때 생성됩니다. 기존 Proxy DB를 다른 노드에 복사하거나 정상 운영 중인 DB를 삭제하지 않습니다.
+
+#### 8. Agent 2 전환
+
+6개 인프라 노드와 이관 대상에 Agent 2를 설치합니다. DB 노드는 PostgreSQL plugin도 설치합니다.
+
+```bash
+sudo apt install -y zabbix-agent2
+# DB1, DB2만
+sudo apt install -y zabbix-agent2-plugin-postgresql
+```
+
+기존 Agent 1이 설치돼 있으면 먼저 정상적으로 중지·비활성화합니다. 강제 `kill -9`는 사용하지 않습니다.
+
+```bash
+if systemctl list-unit-files zabbix-agent.service --no-legend | grep -q zabbix-agent; then
+  sudo systemctl disable --now zabbix-agent
+fi
+```
+
+`zabbix_agent2.conf`를 배포하고 Host별 `Hostname`을 UI의 Host name과 일치시킵니다.
 
 ```ini
-Server=<PROXY1_IP>,<PROXY2_IP>
-ServerActive=<PROXY1_IP>;<PROXY2_IP>
+# Passive Check 허용 목록: 쉼표로 나열
+Server=<SERVER1_IP>,<SERVER2_IP>
+
+# Active Check HA endpoint: 세미콜론으로 순차 접속
+ServerActive=<SERVER1_IP>;<SERVER2_IP>
 Hostname=<EXACT_ZABBIX_HOST_NAME>
 ```
+
+모든 대상을 Proxy Group으로 수집한다면 Agent의 `Server`와 `ServerActive`를 Server가 아니라 해당 Proxy 주소/그룹 설계에 맞게 변경합니다.
 
 ```bash
 sudo zabbix_agent2 -T -c /etc/zabbix/zabbix_agent2.conf
 sudo systemctl enable --now zabbix-agent2
-sudo journalctl -u zabbix-agent2 -n 100 --no-pager
+zabbix_get -s 127.0.0.1 -k agent.ping
 ```
 
-`Hostname`은 Web UI에 등록한 Host name과 대소문자까지 일치해야 합니다. Agent가 Server에 직접 연결되는 구조라면 Proxy IP 대신 Server1/Server2 주소를 같은 구분자 규칙으로 지정합니다.
+#### 9. DNS·RTMP External Check 배포
 
-### 8. DNS·RTMP External Check 포팅
+External Check가 Proxy를 통해 실행되면 Proxy1과 Proxy2 모두에 같은 파일과 의존성을 배포합니다. Server 직접 실행 Host가 있다면 두 Server에도 동일하게 배포합니다.
 
-#### DNS Check
+```bash
+sudo apt install -y dnsutils rtmpdump
+sudo install -d -o root -g zabbix -m 0750 /usr/lib/zabbix/externalscripts
 
-`dig`로 지정 DNS Server의 A record를 질의하고 JSON을 반환합니다.
-
-```json
-{"response":"success","time":0.023,"ip":"192.0.2.10"}
+sudo install -o zabbix -g zabbix -m 0750 \
+  check_dns.sh /usr/lib/zabbix/externalscripts/check_dns.sh
+sudo install -o zabbix -g zabbix -m 0750 \
+  check_rtmp.sh /usr/lib/zabbix/externalscripts/check_rtmp.sh
 ```
 
-권장 Item 설계:
+Linux에서 작성한 LF 줄바꿈인지 확인하고 Zabbix 계정으로 실행합니다.
 
-- Master Item: `check_dns.sh["{$DNS.SERVER}","{$DNS.DOMAIN}"]`, Text
-- Dependent Item: `$.response`, Text
-- Dependent Item: `$.time`, Numeric(float), unit `s`
-- Dependent Item: `$.ip`, Text
+```bash
+file /usr/lib/zabbix/externalscripts/check_dns.sh
+file /usr/lib/zabbix/externalscripts/check_rtmp.sh
 
-운영 적용 시 `dig` 종료 코드, `SERVFAIL`, `NXDOMAIN`, 복수 A record를 구분하고 인자를 검증해야 합니다.
+sudo -u zabbix /usr/lib/zabbix/externalscripts/check_dns.sh \
+  1.1.1.1 example.com
+sudo -u zabbix /usr/lib/zabbix/externalscripts/check_rtmp.sh \
+  'rtmp://<STREAM_HOST>/<STREAM_PATH>'
+```
 
-#### RTMP Check
-
-`rtmpdump`로 짧은 미디어 구간을 실제 수신하고, 수신 파일이 존재하면 `1`, 실패하면 `0`을 반환합니다. 1차 실패 시 재시도하며 Trigger는 최근 2분간 성공 여부로 오탐을 줄입니다.
+DNS 권장 Item 구성:
 
 ```text
-max(/RTMP Stream Monitoring/check_rtmp.sh["{$RTMP.URL}"],2m)=0
+Master Item
+  Type: External check
+  Key: check_dns.sh["{$DNS.SERVER}","{$DNS.DOMAIN}"]
+  Type of information: Text
+
+Dependent Items
+  $.response  → 상태
+  $.time      → 응답시간, Numeric(float), s
+  $.ip        → 조회 IP, Text
 ```
 
-운영 스크립트는 다음 조건을 만족해야 합니다.
+RTMP 권장 Item/Trigger 구성:
 
-- `mktemp`로 임시 파일 생성
-- `trap`으로 정상·비정상 종료 시 파일 삭제
-- `timeout`으로 최대 실행시간 제한
-- Zabbix `Timeout`보다 짧은 실행시간 보장
-- URL 입력 검증 및 실행 오류 로그 분리
+```text
+Item key:
+  check_rtmp.sh["{$RTMP.URL}"]
 
-배포 예시:
-
-```bash
-sudo install -o zabbix -g zabbix -m 0750 check_dns.sh /usr/lib/zabbix/externalscripts/check_dns.sh
-sudo install -o zabbix -g zabbix -m 0750 check_rtmp.sh /usr/lib/zabbix/externalscripts/check_rtmp.sh
-sudo -u zabbix /usr/lib/zabbix/externalscripts/check_dns.sh <DNS_SERVER> example.com
-sudo -u zabbix /usr/lib/zabbix/externalscripts/check_rtmp.sh '<RTMP_URL>'
+Trigger 예시:
+  max(/RTMP Stream Monitoring/check_rtmp.sh["{$RTMP.URL}"],2m)=0
 ```
 
-### 9. 통합 검증
-
-```bash
-# etcd
-etcdctl endpoint health --cluster
-
-# Patroni/PostgreSQL
-sudo patronictl -c /etc/patroni/patroni.yml list
-PGPASSWORD='<DB_PASSWORD>' psql -h 127.0.0.1 -U zabbix -d zabbix \
-  -c 'SELECT pg_is_in_recovery();'
-
-# Zabbix Server HA
-sudo zabbix_server -R ha_status
-
-# 서비스 및 최근 오류
-systemctl --no-pager --full status patroni haproxy zabbix-server zabbix-proxy zabbix-agent2
-journalctl -p warning..alert --since '-30 min' --no-pager
-```
-
-Web UI에서는 다음을 확인합니다.
-
-- `Reports → System information`: Zabbix Server Active/Standby 상태
-- `Administration → Proxies`: 두 Proxy의 online 상태와 group 배정
-- `Monitoring → Latest data`: Agent, DNS, RTMP 데이터 갱신
-- `Monitoring → Queue`: 지연 Item 유무
-- DB/Proxy internal item: cache, process busy, NVPS, replication lag
-
-### 10. Rollback 기준
-
-- 신규 환경의 수집·알림이 검증되기 전 기존 Server 데몬을 제거하지 않습니다.
-- 병행 운영 중 중복 알림을 방지하도록 한쪽 Action 또는 Media Type을 비활성화합니다.
-- 전환 실패 시 Agent의 `Server`와 `ServerActive`를 기존 주소로 복구하고 Agent를 재시작합니다.
-- 기존 DB와 VM은 보존 기간 동안 read-only 조회 또는 snapshot 복구 용도로 유지합니다.
-- 신규 데이터와 기존 데이터가 동시에 쓰이지 않도록 활성 Server를 명확히 한 뒤 rollback합니다.
+RTMP 스크립트는 1차 실패 시 2초 뒤 한 번 재시도하고 최근 2분 전체가 실패할 때만 Trigger가 발생하도록 해 순간 오탐을 줄입니다. 배포본에는 임시 FLV 파일 삭제 로직을 유지합니다.
 
 ## Zabbix 및 Nagios 마이그레이션
 
@@ -639,7 +737,7 @@ Template → Host Group → Host → Item/Trigger 검증 → Action/Media Type
 ```
 
 1. 기존 Zabbix 설정을 JSON/YAML로 export합니다.
-2. 신규 Zabbix 7.0에 의존성 순서대로 import합니다.
+2. 신규 Zabbix 7.0.29에 의존성 순서대로 import합니다.
 3. 일부 대상부터 Agent 2와 Proxy Group으로 전환합니다.
 4. 1~4주간 기존 시스템과 병행 운영하며 수집 누락과 알림 오탐을 비교합니다.
 5. 안정화 후 기존 Zabbix Server 데몬을 중지합니다.
