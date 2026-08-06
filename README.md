@@ -171,6 +171,140 @@ getent hosts vm-zabbix-db1 vm-zabbix-db2 vm-zabbix-server1 vm-zabbix-server2
 
 모든 노드의 시간 동기화와 정방향 이름 해석이 정상이어야 합니다.
 
+### 0-1. Zabbix 7.0 공식 패키지 설치
+
+현재 저장소의 Nginx·PHP 경로와 구축 환경에 맞춰 **Ubuntu 24.04 LTS / Zabbix 7.0 LTS / PostgreSQL / Nginx** 조합을 기준으로 합니다. Ubuntu 기본 저장소의 Zabbix 패키지는 버전이 오래되거나 필요한 기능이 빠질 수 있으므로 [Zabbix 공식 저장소](https://repo.zabbix.com/zabbix/7.0/ubuntu/)를 사용합니다.
+
+먼저 각 노드의 OS와 CPU architecture를 확인합니다.
+
+```bash
+. /etc/os-release
+printf 'OS=%s VERSION=%s ARCH=%s\n' "$ID" "$VERSION_ID" "$(dpkg --print-architecture)"
+```
+
+아래 저장소 패키지는 Ubuntu 24.04 `amd64` 기준입니다. Ubuntu 20.04/22.04 또는 `arm64`를 사용한다면 파일명을 임의로 바꾸지 말고 [Zabbix 다운로드 페이지](https://www.zabbix.com/download?zabbix=7.0)에서 OS와 architecture에 맞는 7.0 LTS 저장소를 선택합니다.
+
+#### 모든 Zabbix 구성 노드에 공식 저장소 등록
+
+Server, Proxy, DB와 Agent 2를 설치할 모든 모니터링 대상에서 실행합니다.
+
+```bash
+sudo apt update
+sudo apt install -y wget ca-certificates gnupg
+
+wget -O /tmp/zabbix-release.deb \
+  https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu24.04_all.deb
+sudo dpkg -i /tmp/zabbix-release.deb
+sudo apt update
+rm -f /tmp/zabbix-release.deb
+
+apt-cache policy zabbix-server-pgsql zabbix-proxy-sqlite3 zabbix-agent2
+```
+
+`apt-cache policy`의 Candidate가 `repo.zabbix.com/zabbix/7.0`에서 제공되는지 확인한 뒤 역할별 패키지를 설치합니다.
+
+#### Server1·Server2: Zabbix Server, Web frontend, Agent 2
+
+두 Zabbix Server 노드에 동일하게 설치합니다.
+
+```bash
+sudo apt install -y \
+  zabbix-server-pgsql \
+  zabbix-frontend-php \
+  php8.3-pgsql \
+  zabbix-nginx-conf \
+  zabbix-sql-scripts \
+  zabbix-agent2 \
+  zabbix-get \
+  zabbix-sender \
+  fping
+
+zabbix_server --version
+zabbix_agent2 --version
+nginx -v
+php -v
+```
+
+패키지 설치 직후에는 아직 DB와 HA node 값이 설정되지 않았으므로 Zabbix Server를 시작하지 않습니다. 자동으로 시작되었다면 설정 배포 단계까지 중지합니다.
+
+```bash
+sudo systemctl stop zabbix-server
+```
+
+각 패키지의 역할은 다음과 같습니다.
+
+| 패키지 | 역할 |
+| --- | --- |
+| `zabbix-server-pgsql` | PostgreSQL backend용 Zabbix Server |
+| `zabbix-frontend-php` | Zabbix Web frontend PHP 파일 |
+| `php8.3-pgsql` | PHP에서 PostgreSQL에 접속하기 위한 확장 |
+| `zabbix-nginx-conf` | Nginx·PHP-FPM용 기본 설정과 socket 구성 |
+| `zabbix-sql-scripts` | Server schema와 TimescaleDB schema |
+| `zabbix-agent2` | Server 노드 자체 모니터링 |
+| `zabbix-get`, `zabbix-sender` | Agent 통신 점검과 trapper 부하 테스트 도구 |
+
+#### Proxy1·Proxy2: SQLite 기반 Zabbix Proxy와 Agent 2
+
+두 Proxy 노드에 동일하게 설치합니다.
+
+```bash
+sudo apt install -y \
+  zabbix-proxy-sqlite3 \
+  zabbix-sql-scripts \
+  zabbix-agent2 \
+  zabbix-get \
+  zabbix-sender \
+  fping \
+  dnsutils \
+  rtmpdump
+
+zabbix_proxy --version
+zabbix_agent2 --version
+sudo systemctl stop zabbix-proxy
+```
+
+`zabbix-proxy-sqlite3`는 각 Proxy가 사용하는 로컬 SQLite backend 패키지입니다. Server DB와 Proxy DB를 공유하지 않습니다. `dnsutils`와 `rtmpdump`는 이 프로젝트의 DNS·RTMP External Check에 필요합니다.
+
+#### DB1·DB2: Agent 2와 PostgreSQL plugin
+
+DB 노드 자체의 OS와 PostgreSQL 상태를 수집하기 위해 설치합니다.
+
+```bash
+sudo apt install -y \
+  zabbix-agent2 \
+  zabbix-agent2-plugin-postgresql \
+  zabbix-get
+
+zabbix_agent2 --version
+dpkg -l | grep -E '^ii\s+zabbix-(agent2|agent2-plugin-postgresql)'
+```
+
+#### 나머지 Linux 모니터링 대상: Agent 2
+
+```bash
+sudo apt install -y zabbix-agent2
+sudo systemctl stop zabbix-agent2
+zabbix_agent2 --version
+```
+
+Agent는 [7. Agent 2 연결](#7-zabbix-agent-2-연결)의 `Server`, `ServerActive`, `Hostname`을 설정한 후 시작합니다.
+
+#### 설치 결과 확인
+
+Server 노드에서 다음 패키지가 확인되어야 합니다.
+
+```bash
+dpkg -l | grep -E '^ii\s+(zabbix|php8.3-pgsql)'
+ls -l /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz
+ls -l /usr/share/zabbix-sql-scripts/postgresql/timescaledb/schema.sql
+```
+
+서비스는 아직 모두 실행될 필요가 없습니다. 이후 단계에서 DB와 설정 파일을 먼저 준비하고 다음 순서로 시작합니다.
+
+```text
+etcd → Patroni/PostgreSQL → HAProxy → Zabbix Server/Web → Proxy → Agent 2
+```
+
 ### 1. etcd 3-node quorum 구성
 
 DB1, DB2, Server1에 etcd를 설치합니다.
