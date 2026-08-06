@@ -1,236 +1,661 @@
-# 🚀 Enterprise Zabbix 7.0 High Availability (HA) Infrastructure
+# Zabbix 7.0 HA 통합 모니터링 인프라
 
 ![Zabbix](https://img.shields.io/badge/Zabbix-7.0%20LTS-red?style=flat&logo=zabbix)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue?style=flat&logo=postgresql)
+![TimescaleDB](https://img.shields.io/badge/TimescaleDB-2.x-fdb515?style=flat&logo=timescale)
 ![Patroni](https://img.shields.io/badge/Patroni-HA-green?style=flat)
-![Nginx](https://img.shields.io/badge/Nginx-1.24-brightgreen?style=flat&logo=nginx)
-![HAProxy](https://img.shields.io/badge/HAProxy-LB-blue?style=flat&logo=haproxy)
+![HAProxy](https://img.shields.io/badge/HAProxy-Primary%20Router-blue?style=flat)
 
-> **단일 장애점(SPOF)을 배제한 Zabbix 7.0 모니터링 인프라 구축 프로젝트**
+Zabbix 6.0과 Nagios로 분리되어 있던 모니터링 환경을 **Zabbix 7.0 LTS 기반 단일 플랫폼**으로 통합하고, Server·Database·Proxy 계층을 이중화한 프로젝트입니다. PostgreSQL 16과 TimescaleDB로 시계열 데이터 처리 기반을 개선했으며, Patroni·etcd·HAProxy를 조합해 쓰기 가능한 Primary DB로 자동 연결되도록 구성했습니다.
 
----
+> 이 저장소의 주소·계정·비밀번호는 `<MASKED_...>` 형태로 비식별화되어 있습니다. 배포 전에 환경별 값으로 교체하고 비밀정보는 Git이 아닌 Vault, systemd credential, Ansible Vault 등의 별도 저장소에서 관리하세요.
 
-## 📌 1. 프로젝트 개요 (Project Overview)
+## 목차
 
-본 프로젝트는 대규모 모니터링 환경에서 특정 서버, DB, 네트워크 장비가 다운되더라도 **24/7 중단 없는 모니터링 및 알림 연동**을 유지하기 위한 **고가용성(HA) 인프라 구축**을 목적으로 진행되었습니다.
+- [프로젝트 개요](#프로젝트-개요)
+- [아키텍처](#아키텍처)
+- [주요 성과](#주요-성과)
+- [저장소 구성](#저장소-구성)
+- [구축 및 포팅 매뉴얼](#구축-및-포팅-매뉴얼)
+- [Zabbix 및 Nagios 마이그레이션](#zabbix-및-nagios-마이그레이션)
+- [부하 테스트](#부하-테스트)
+- [Failover 검증](#failover-검증)
+- [트러블슈팅](#트러블슈팅)
+- [운영·보안 체크리스트](#운영보안-체크리스트)
 
-- **목표:** 전 계층(Web, App, DB, Proxy)에 대한 자동 장애 조치(Failover) 및 부하 분산 구현
-- **주요 구성:** Zabbix 7.0 Native HA + Patroni (PostgreSQL 16 + TimescaleDB) + etcd Quorum + Local HAProxy + Zabbix Proxy Group
+## 프로젝트 개요
 
----
+| 구분 | 내용 |
+| --- | --- |
+| 프로젝트명 | Zabbix 7.0 기반 통합 모니터링 시스템 구축 및 Nagios 마이그레이션 |
+| 수행 기간 | 2026.07.15 ~ 2026.08.05 |
+| 기존 환경 | Zabbix 6.0 LTS, MySQL 8.0, Zabbix Agent, Nagios, 단일 VM 중심 구성 |
+| 개선 환경 | Zabbix 7.0 LTS, PostgreSQL 16, TimescaleDB, Agent 2, Patroni, etcd, HAProxy, Proxy Group |
+| 수행 범위 | 아키텍처 설계, 구축·업그레이드, Nagios 항목 분석·이관, 외부검사 개발, 부하 및 Failover 테스트, 문서화 |
+| 핵심 목표 | 플랫폼 단일화, 계층별 SPOF 축소, 장애 대응 자동화, 시계열 데이터 확장성 확보 |
 
-## 📐 2. 아키텍처 다이어그램 (Architecture Diagram)
-![alt text](AD1.png)
-![alt text](AD2.png)
+기존 환경에서는 동일한 호스트와 검사 항목을 Zabbix와 Nagios에서 중복 관리하고, 알림·임계치·장애 대응 기준도 플랫폼별로 운영해야 했습니다. 본 프로젝트에서는 호스트명과 IP를 함께 대조해 대상을 정규화하고, HTTP·SSL·ICMP는 Zabbix 기본 기능으로, DNS·RTMP는 External Check로 이관했습니다.
 
----
+## 아키텍처
 
-## 🖥️ 3. 서버 및 네트워크 토폴로지 (Server & Network Topology)
+![전체 아키텍처](AD1.png)
 
-| 계층 (Tier) | 호스트명 (Hostname) | 주요 역할 및 탑재 서비스 |
-| :--- | :--- | :--- |
-| **Web / App 1** | `vm-zabbix-server1` | Nginx, PHP 8.3, Zabbix Server 1 (Active), Local HAProxy, etcd Node 3 |
-| **Web / App 2** | `vm-zabbix-server2` | Nginx, PHP 8.3, Zabbix Server 2 (Standby), Local HAProxy, Zabbix |
-| **Database 1** | `vm-zabbix-DB1` | Patroni (Leader), PostgreSQL 16 + TimescaleDB, etcd Node 1 |
-| **Database 2** | `vm-zabbix-DB2` | Patroni (Replica), PostgreSQL 16 + TimescaleDB, etcd Node 2 |
-| **Proxy 1** | `vm-zabbix-proxy1` | Zabbix Proxy 1 (Active Mode, SQLite3), `ixcloud-proxy-group` 소속 |
-| **Proxy 2** | `vm-zabbix-proxy2` | Zabbix Proxy 2 (Active Mode, SQLite3), `ixcloud-proxy-group` 소속 |
-
----
-
-## 🛠️ 4. 계층별 상세 구현 및 주요 기술 (Technical Architecture)
-
-### 4.1. App 계층 (Zabbix 7.0 Native HA)
-- **Active-Standby 런타임 클러스터:** Zabbix 7.0 자체 HA 엔진 기반 구성. DB 내 `ha_node` 테이블 락(Lock) 상태에 따라 Active/Standby 자동 전환.
-- **웹 대시보드 자동 Active 추적:** `zabbix.conf.php` 설정으로 웹 프론트엔드가 현재 `active` 상태인 서버로만 런타임 제어 신호를 동적으로 보낼 수 있도록 동작.
-
-### 4.2. Database 계층 (Patroni + PostgreSQL 16 + TimescaleDB)
-- **Patroni 기반 이중화 DB:** PostgreSQL 16 실시간 스트리밍 복제 및 자동 장애 승격(Failover) 구성을 위한 Patroni 적용.
-- **etcd 3-Node Quorum:** DB 노드 2개(`DB1`, `DB2`)와 App 노드 1개(`Server1`)에 etcd 분산 배치로 Split-Brain 방지.
-- **App 서버 내 Local HAProxy 배치:** 
-  - App 서버 내부의 Local HAProxy가 Patroni REST API(`8008/primary`) 헬스체크를 수행하여 항상 200 OK를 반환하는 Leader DB(`5432`)로만 커넥션을 점검.
-- **TimescaleDB Extention:** 시계열 하이퍼테이블(Hypertable)을 주입하여 대규모 성능 데이터 집계 및 삭제(Housekeeper) 처리 시 발생할 수 있는 DB I/O 병목 완화.
-
-### 4.3. Proxy 계층 (Zabbix 7.0 Proxy Group & Multi-IP HA)
-- **Proxy Group 수집 부하 분산:** Zabbix 7.0 신규 기능인 `Proxy Group`을 구성하여, 단일 프록시 장애 시 타겟 호스트 모니터링 작업을 즉시 남은 프록시가 승계.
-
----
-
-## 📑 5. 세부 검증 보고서: 장애 절체(Failover) 성능 및 데이터 무결성 검증
-
-### 5.1. [시나리오 1] Patroni DB Cluster Switchover 검증
-
-Primary DB(`vm-zabbix-db1`) 절체 시 HAProxy 라우팅 변경 및 Zabbix Server의 DB 자동 재연동 성능을 검증합니다.
+![HA 및 장애조치 흐름](AD2.png)
 
 ```text
-[DB 장애 발생] 15:31:23.333
-       │
-       ▼ (14.67초 간 DB2 승격 및 HAProxy 감지)
-[HAProxy DB2 200 OK] 15:31:38.000
-       │
-       ▼ (3.96초 간 Zabbix Server 대기 및 세션 재확립)
-[Zabbix DB 재연동 완료] 15:31:41.955  <--- RTO: 18.62초
+Monitoring targets
+    │ Agent 2 / SNMP / ICMP / HTTP / External Check
+    ▼
+Zabbix Proxy Group
+    ├─ Proxy 1 (active mode, SQLite)
+    └─ Proxy 2 (active mode, SQLite)
+    │
+    ▼
+Zabbix Server Native HA
+    ├─ Server 1 (Active 또는 Standby)
+    └─ Server 2 (Active 또는 Standby)
+    │ 127.0.0.1:5432
+    ▼
+Local HAProxy on each server
+    │ Patroni REST API /primary health check
+    ▼
+PostgreSQL 16 + TimescaleDB
+    ├─ DB1 (Primary 또는 Replica)
+    └─ DB2 (Primary 또는 Replica)
+       └─ Patroni + 3-node etcd quorum
 ```
 
-#### ⏱️ 5.1.1. 복구 시간(RTO) 측정 및 로그 근거
+### 노드 역할
 
-- **RTO 산출 결과:** 18.62초 (Zabbix DB 접속 끊김 감지 ~ DB 접속 자동 재확립)
+| 계층 | 호스트명 | 주요 역할 |
+| --- | --- | --- |
+| Web / App 1 | `vm-zabbix-server1` | Nginx, PHP 8.3, Zabbix Server, Local HAProxy, etcd member 3 |
+| Web / App 2 | `vm-zabbix-server2` | Nginx, PHP 8.3, Zabbix Server, Local HAProxy |
+| Database 1 | `vm-zabbix-db1` | PostgreSQL 16, TimescaleDB, Patroni, etcd member 1 |
+| Database 2 | `vm-zabbix-db2` | PostgreSQL 16, TimescaleDB, Patroni, etcd member 2 |
+| Proxy 1 | `vm-zabbix-proxy1` | Zabbix Proxy active mode, SQLite, Proxy Group member |
+| Proxy 2 | `vm-zabbix-proxy2` | Zabbix Proxy active mode, SQLite, Proxy Group member |
 
-##### 📝 로그 근거
+### 계층별 고가용성
 
-1. **DB 접속 끊김 및 Down 최초 감지 (`vm-zabbix-server1` 로그)**
+- **Zabbix Server:** 두 서버가 같은 DB를 사용하며 한 노드만 Active로 동작합니다. Active 노드의 heartbeat가 끊기면 Standby가 자동 승격됩니다.
+- **Database:** Patroni가 etcd의 분산 상태를 기준으로 Primary를 선출하고 PostgreSQL Streaming Replication을 관리합니다.
+- **DB 연결:** 각 Zabbix Server의 Local HAProxy가 Patroni `/primary` API에서 HTTP 200을 반환하는 노드에만 DB 연결을 전달합니다.
+- **Proxy:** Zabbix 7.0 Proxy Group이 수집 부하를 분산하며 장애 Proxy의 호스트를 생존 Proxy로 재할당합니다.
+- **Frontend:** `$ZBX_SERVER`를 고정하지 않아 DB의 HA 노드 정보를 바탕으로 현재 Active Zabbix Server를 찾도록 구성합니다.
 
-> `56170:20260728:153123.333 connection to database 'zabbix' failed: ... FATAL: the database system is shutting down`  
-> `56170:20260728:153123.333 database is down: reconnecting in 10 seconds`
+## 주요 성과
 
-- **분석:** `15:31:23.333`에 Zabbix Server가 DB1의 Shutdown 및 연결 중단을 최초 인지함.
+| 검증 항목 | 결과 |
+| --- | ---: |
+| Nagios 전수 비교 대상 | 259 hosts |
+| 부하 테스트 대상 | 2,000 dummy hosts |
+| Host당 Item / Trigger | 25 / 25 |
+| 전체 Item | 약 50,000 |
+| 수집 주기 | 10초 |
+| 목표 수집량 | 약 5,000 NVPS |
+| DB Failover 연결 복구 | 18.62초 |
+| Zabbix Server Active 승격 | 2.55초 |
+| Zabbix Server 전체 서비스 복구 | 6.61초 |
+| Proxy 장애 감지 | 63.35초 |
+| Proxy Host 이관 완료 | 70.77초 |
 
-2. **HAProxy 헬스체크 기반 Primary 전환 (`vm-zabbix-server2` HAProxy 로그)**
+데이터 손실 수치는 테스트 로그와 History 저장 결과에서 **관찰되지 않은 범위**를 의미합니다. 비정상 전원 차단, 네트워크 분할, 동기 복제 설정 등 모든 장애 조건에서의 절대적인 RPO 0을 보장하는 표현은 아닙니다.
 
-> `Jul 28 15:31:38 vm-zabbix-server2 haproxy[827]: Server postgres_back/db2 is UP, reason: Layer7 check passed, code: 200`  
-> `Jul 28 15:31:41 vm-zabbix-server2 haproxy[827]: Server postgres_back/db1 is DOWN, reason: Layer7 wrong status, code: 503`
-
-- **분석:** Patroni Switchover 실행 후, `15:31:38`에 HAProxy가 DB2의 8008 REST API `/primary` 200 OK 상태를 감지하여 5432 트래픽을 DB2로 즉시 라우팅 변경함.
-
-3. **Zabbix Server DB 연동 완전 복구 (`vm-zabbix-server1` 로그)**
-
-> `56038:20260728:153141.955 database connection re-established`  
-> `56070:20260728:153147.167 database connection re-established`
-
-- **분석:** `15:31:41.955`에 최초 DB 연동 세션이 재확립되었으며, `15:31:47.167`에 Server 내부 수집 프로세스 전체 세션이 복구됨.
-- **최종 RTO:** $15:31:41.955 - 15:31:23.333 = \mathbf{18.622\,초}$
-
-#### 🛡️ 5.1.2. 데이터 무결성 검토 결과 (RPO = 0 수준으로 평가)
-
-1. **Read-Only(Standby) 순간 재접속 시 Zabbix 자체 버퍼 대기 메커니즘 작동**
-
-> `56042:20260728:153137.189 database is read-only: reconnecting in 10 seconds`
-
-- **평가:** DB2가 Primary로 승격되기 직전의 `15:31:37` 시점에 접속 시도 시, Zabbix Server는 에러 종료하지 않고 Read-Only 상태를 감지한 뒤 메모리 버퍼에 남은 데이터를 유지하며 대기하는 동작을 보였음.
-
-2. **DB 복구 후 수집 아이템의 정상 상태(Supported) 일괄 복원 및 저장**
-
-> `56037:20260728:153225.675 item "vm-zabbix-DB1:pgsql.queries[...] became supported`  
-> `56030:20260728:153226.545 item "vm-zabbix-server1:zabbix[cluster,discovery,nodes]" became supported`
-
-- **평가:** DB 접속 재확립 직후, 연결 중단으로 대기 모드(`became not supported`)에 들어갔던 모니터링 아이템들이 `15:32:25`부터 정상 수집 상태로 복구되었고, 이 과정에서 지연된 메트릭이 DB에 정상적으로 반영된 것으로 확인됨.
-
-### 5.2. [시나리오 2] Zabbix Server HA 절체 검증
-
-Active Zabbix Server 1 다운 시 Standby 상태인 Zabbix Server 2의 Active 승격 및 인프라 제어권 승계 성능을 검증합니다.
+## 저장소 구성
 
 ```text
-[Server 1 Stop 명령] 15:35:28.597
-       │
-       ▼ (2.55초 간 하트비트 중단 감지 및 Standby ➔ Active 승격)
-[Server 2 Active 승격] 15:35:31.144  <--- 핵심 RTO: 2.55초
-       │
-       ▼ (4.06초 간 전체 프로세스/프록시 그룹 모니터링 가동)
-[Proxy Group 연동 완료] 15:35:35.209  <--- 서비스 완전 복구 RTO: 6.61초
+zabbix-ha-infrastructure/
+├─ HAproxy/
+│  └─ haproxy.cfg                 # Patroni Primary 기반 DB 라우팅
+├─ Nginx/
+│  └─ zabbix.conf                 # Zabbix Web frontend
+├─ patroni/
+│  ├─ DB1_patroni.yml             # DB1 Patroni 설정
+│  └─ DB2_patroni.yml             # DB2 Patroni 설정
+├─ Zabbix/
+│  ├─ zabbix_server.conf          # Zabbix Server HA 설정
+│  ├─ zabbix_proxy.conf           # Active Proxy 설정
+│  ├─ zabbix_agent2.conf          # Agent 2 설정
+│  ├─ zabbix.conf.php             # Web frontend DB/HA 설정
+│  ├─ DNS_Check.sh                # DNS 검사 예제와 설치 메모
+│  └─ RTMP_Check.sh               # RTMP 검사 예제와 설치 메모
+├─ Load_Test/
+│  ├─ create_hosts.py             # Dummy host 생성
+│  ├─ add_triggers.py             # Trigger 생성
+│  ├─ load_generator.py           # zabbix_sender 부하 생성
+│  └─ delete_hosts.py             # Dummy host 정리
+├─ docs/                          # 발표·보고 자료
+├─ AD1.png
+├─ AD2.png
+└─ README.md
 ```
 
-#### ⏱️ 5.2.1. 복구 시간(RTO) 측정 및 로그 근거
+> `DNS_Check.sh`와 `RTMP_Check.sh`에는 현재 설치 절차와 실행 코드가 함께 들어 있습니다. 운영 서버의 ExternalScripts 디렉터리에 그대로 복사하지 말고, `#!/bin/bash`부터 검사 로직만 별도 `check_dns.sh`, `check_rtmp.sh`로 분리한 뒤 배포하세요.
 
-- **노드 승격 RTO:** 2.55초 (Server 1 중단 명령 ~ Server 2 Active 모드 전환)
-- **전체 서비스 복구 RTO:** 6.61초 (Server 1 중단 명령 ~ Proxy Group 관리 데몬 가동 완료)
+## 구축 및 포팅 매뉴얼
 
-##### 📝 로그 근거
+이 절차는 Ubuntu 계열 Linux와 systemd를 기준으로 합니다. 패키지 저장소 등록 방식과 PHP socket 경로는 OS 및 Zabbix 패키지 버전에 맞게 조정해야 합니다.
 
-1. **Server 1 중단 명령 투입 시각 (`vm-zabbix-server1` 터미널)**
+### 0. 배포 전 준비
 
-> `ubuntu@vm-zabbix-server1:~$ date "+%Y-%m-%d %H:%M:%S.%3N" && sudo systemctl stop zabbix-server`  
-> `2026-07-28 15:35:28.597`
-
-2. **Server 2의 Active 노드 승격 감지 (`vm-zabbix-server2` 로그)**
-
-> `51092:20260728:153531.144 "zabbix-server2" node switched to "active" mode`
-
-- **분석:** Server 1 서비스 종료 시작 후 불과 2.547초 만에 Server 2가 하트비트 이탈을 감지하고 `active` 상태로 승격됨.
-
-3. **내부 관리자 프로세스 및 Proxy Group 가동 완료 (`vm-zabbix-server2` 로그)**
-
-> `53777:20260728:153535.135 server #205 started [proxy group manager #1]`  
-> `53777:20260728:153535.209 Proxy "zabbix-proxy2" changed state from unknown to online`  
-> `53777:20260728:153535.209 Proxy group "ixcloud-proxy-group" changed state from unknown to online`
-
-- **최종 RTO:** $15:35:35.209 - 15:35:28.597 = \mathbf{6.612\,초}$
-
-#### 🛡️ 5.2.2. 데이터 무결성 검토 결과 (RPO = 0 수준으로 평가)
-
-1. **Server 1 종료 직전 메모리 데이터(History/Trend) DB Flush 완료**
-
-> `56039:20260728:153529.083 syncing history data done`  
-> `55992:20260728:153530.450 syncing trend data... 100.000000%`  
-> `55992:20260728:153530.450 syncing trend data done`  
-> `55992:20260728:153530.554 Zabbix Server stopped.`
-
-- **평가:** Server 1이 종료되면서 기존 메모리 버퍼의 History 및 Trend 데이터가 DB에 100% 저장 완료(`100.000000%`)된 후 프로세스가 정상 종료된 것으로 확인됨.
-
-2. **프록시 세션 즉시 승계 및 데이터 전달 지속**
-
-- Server 2가 승격된 `15:35:35.209` 시점에 `zabbix-proxy1`, `zabbix-proxy2` 제어권이 정상적으로 승계되었고, 프록시 버퍼에 저장되어 있던 메트릭 데이터가 Server 2로 이어져 수집이 지속된 것으로 확인됨.
-
-### 5.3. [시나리오 3] Zabbix Proxy Group Failover 검증
-
-Active Proxy 1 중단 시 Zabbix 7.0 Native Proxy Group 고가용성 기능(`Failover period: 1m`)에 의해 Proxy 1 담당 호스트(1,000대)가 Proxy 2로 이관되어 수집을 지속하는지 검증합니다.
+먼저 다음 값을 환경별로 확정합니다.
 
 ```text
-[Proxy 1 Stop 명령] 15:40:16.984
-       │
-       ▼ (63.35초 간 Failover period 1분 관찰 및 Offline 판정)
-[Proxy 1 Offline 감지] 15:41:20.336  <--- 장애 감지 RTO: 63.35초
-       │
-       ▼ (7.42초 간 Zabbix Server 호스트 자동 재할당 및 Proxy 2 Config 전달)
-[Proxy 2 Config 전송] 15:41:27.758  <--- 이관 완료 RTO: 70.77초
-       │
-       ▼ (12.80초 후 DB 대량 History Bulk Insert 정상 수행)
-[DB History Bulk Insert] 15:41:40.557  <--- 데이터 수집/저장 무결성 입증
+<DB1_IP>       <DB2_IP>
+<SERVER1_IP>   <SERVER2_IP>
+<PROXY1_IP>    <PROXY2_IP>
+<SERVICE_CIDR>
+<DB_PASSWORD>  <REPLICATION_PASSWORD>  <MONITOR_PASSWORD>
 ```
 
-#### ⏱️ 5.3.1. 복구 시간(RTO) 측정 및 로그 근거
+필수 포트는 최소 범위의 방화벽 정책으로 허용합니다.
 
-- **장애 감지 RTO:** 63.35초 (Proxy 1 중단 ~ Server의 Offline 판정)
-- **호스트 이관 RTO:** 70.77초 (Proxy 1 중단 ~ Proxy 2 설정 전송 및 모니터링 이관)
+| Port | Source → Destination | 용도 |
+| ---: | --- | --- |
+| 80/443 | User → Web nodes | Zabbix UI |
+| 10050 | Server/Proxy → Agent | Passive check |
+| 10051 | Proxy/Agent → Zabbix Server | Active proxy/check 및 trapper |
+| 5432 | Zabbix Server → Local HAProxy, DB peer | PostgreSQL |
+| 8008 | HAProxy/DB admin network → Patroni | Patroni REST health check |
+| 2379 | Patroni nodes → etcd members | etcd client |
+| 2380 | etcd members ↔ etcd members | etcd peer |
 
-##### 📝 로그 근거
+배포 전 공통 확인:
 
-1. **Proxy 1 강제 중단 명령 투입 (`vm-zabbix-proxy1` 터미널)**
+```bash
+timedatectl status
+hostnamectl
+getent hosts vm-zabbix-db1 vm-zabbix-db2 vm-zabbix-server1 vm-zabbix-server2
+```
 
-> `ubuntu@vm-zabbix-proxy1:~$ date "+%Y-%m-%d %H:%M:%S.%3N" && sudo systemctl stop zabbix-proxy`  
-> `2026-07-28 15:40:16.984`
+모든 노드의 시간 동기화와 정방향 이름 해석이 정상이어야 합니다.
 
-2. **Server 2의 Proxy 1 Offline 판정 (`vm-zabbix-server2` 로그)**
+### 1. etcd 3-node quorum 구성
 
-> `53777:20260728:154120.336 Proxy "zabbix-proxy1" changed state from online to offline`
+DB1, DB2, Server1에 etcd를 설치합니다.
 
-- **분석:** Proxy Group 설정치인 `Failover period: 1m` (60초) 조건에 따라 `15:41:20.336` (63.35초 경과 시점)에 정확히 Offline을 감지함.
+```bash
+sudo apt update
+sudo apt install -y etcd-server etcd-client
+```
 
-3. **Proxy 2로 가상 호스트 이관 및 설정 푸시 (`vm-zabbix-server2` 로그)**
+각 노드의 `/etc/default/etcd`에 고유한 `ETCD_NAME`, peer/client listen 주소를 지정하고, 세 노드 모두 동일한 초기 멤버 목록과 cluster token을 사용합니다.
 
-> `53711:20260728:154127.758 sending configuration data to proxy "zabbix-proxy2" at "192.168.20.15", datalen 4101683, bytes 250191 with compression ratio 16.4`
+```ini
+ETCD_INITIAL_CLUSTER="db1=http://<DB1_IP>:2380,db2=http://<DB2_IP>:2380,server1=http://<SERVER1_IP>:2380"
+ETCD_INITIAL_CLUSTER_STATE="new"
+ETCD_INITIAL_CLUSTER_TOKEN="etcd-zabbix-cluster"
+```
 
-- **분석:** Proxy 1이 다운되자마자 Server 2가 Proxy 1 담당 호스트의 모니터링 구성을 포함한 대용량 Config 데이터(압축 전 4.1MB)를 Proxy 2로 동기화 푸시하여 모니터링 권한을 완전 이관함.
-- **최종 RTO:** $15:41:27.758 - 15:40:16.984 = \mathbf{70.774\,초}$
+노드별 예시는 다음 원칙을 따릅니다.
 
-#### 🛡️ 5.3.2. 데이터 무결성 검토 결과 (RPO = 0 수준으로 평가)
+```ini
+ETCD_NAME="db1"
+ETCD_DATA_DIR="/var/lib/etcd/db1.etcd"
+ETCD_LISTEN_PEER_URLS="http://<DB1_IP>:2380"
+ETCD_LISTEN_CLIENT_URLS="http://<DB1_IP>:2379,http://127.0.0.1:2379"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="http://<DB1_IP>:2380"
+ETCD_ADVERTISE_CLIENT_URLS="http://<DB1_IP>:2379"
+```
 
-1. **Zabbix 7.0 Native Proxy Group의 자동 호스트 재할당(Re-allocation) 메커니즘**
+```bash
+sudo systemctl enable --now etcd
+etcdctl member list
+etcdctl endpoint health --cluster
+```
 
-- Zabbix 7.0의 Proxy Group 아키텍처는 장애 발생 프록시를 이탈 처리하고, 그룹 내 가동 중인 타 프록시(`vm-zabbix-proxy2`)로 감지 대상 호스트들을 자동 이관(Self-reassignment)하도록 설계되어 있음.
+기존 클러스터에 노드를 다시 붙이는 경우 `ETCD_INITIAL_CLUSTER_STATE="existing"` 여부와 기존 member 상태를 먼저 확인해야 합니다. 운영 중인 etcd data directory를 임의로 삭제하지 마세요.
 
-2. **이관 완료 직후 DB 대용량 History Bulk Insert 정상 수행 입증 (`vm-zabbix-server2` 로그)**
+### 2. PostgreSQL 16, TimescaleDB, Patroni 구성
 
-> `53589:20260728:154140.557 slow query: 3.011773 sec, "insert into history (itemid,clock,ns,value) values (240689,1785220893,360488298,48.090000000000003),(240690,1785220893,360491988,48.710000000000001), ... (284438,1785220893,361590882,57.450000000000003);"`
+DB1과 DB2에 OS 버전에 맞는 PostgreSQL·TimescaleDB 공식 저장소를 등록한 후 필요한 패키지를 설치합니다.
 
-- **평가:** Proxy 1 다운 후 Proxy 2가 모니터링 권한을 인수받은 시점(`15:41:27`) 직후인 `15:41:40`에, 절체 기간 동안 수집된 대량 메트릭(Bulk Values)이 DB `history` 테이블로 정상적으로 일괄 저장(Bulk Insert)된 것으로 확인됨. 이를 통해 데이터 누락은 관찰되지 않았음이 확인됨.
+```bash
+sudo apt update
+sudo apt install -y postgresql-16 postgresql-client-16 \
+  timescaledb-2-postgresql-16 patroni python3-psycopg2
+sudo systemctl disable --now postgresql
+```
 
-### 5.4. 종합 대조 요약표 (로그 데이터 대조)
+Patroni가 PostgreSQL 프로세스를 직접 관리하므로 기본 `postgresql.service`는 중지합니다. 저장소의 설정 파일을 각 DB 노드에 복사하고 마스킹 값을 교체합니다.
 
-| 테스트 시나리오 | 장애 인지 시각 | 복구 완료 시각 | RTO (소요시간) | RPO (손실) | 서버/DB 핵심 로그 근거 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **#1. Patroni DB Failover** | `15:31:23.333` | `15:31:41.955` | **18.62초** | **0 수준** | • HAProxy code: 200 (db2)<br>• `database connection re-established`<br>• `became supported` |
-| **#2. Zabbix Server HA** | `15:35:28.597` | `15:35:31.144` | **2.55초** | **0 수준** | • `syncing trend data... 100%`<br>• `"zabbix-server2" node switched to "active" mode` |
-| **#3. Proxy Group Failover** | `15:40:16.984` | `15:41:27.758` | **70.77초** | **0 수준** | • `Proxy "zabbix-proxy1" changed state to offline`<br>• `sending config to proxy "zabbix-proxy2"`<br>• `insert into history ...` |
+```bash
+sudo install -o postgres -g postgres -m 0640 patroni/DB1_patroni.yml /etc/patroni/patroni.yml
+# DB2에서는 DB2_patroni.yml 사용
+sudo ln -sfn /etc/patroni/patroni.yml /etc/patroni/config.yml
+sudo chown -R postgres:postgres /etc/patroni /var/lib/postgresql
+```
+
+설정 핵심값:
+
+- 두 노드의 `scope`, `namespace`, etcd hosts는 동일해야 합니다.
+- `name`, `restapi.listen`, `connect_address`는 노드별로 고유해야 합니다.
+- `shared_preload_libraries: timescaledb`와 `data-checksums`를 유지합니다.
+- `pg_hba`의 `<MASKED_SUBNET>`은 필요한 서비스망으로 최소화합니다.
+- `restapi`와 etcd에 TLS 또는 인증을 적용하지 않는 경우 방화벽으로 관리망 접근만 허용합니다.
+
+> **데이터 삭제 주의:** Patroni 최초 bootstrap을 위해 기존 PostgreSQL data directory를 비워야 할 수 있습니다. `rm -rf /var/lib/postgresql/16/main`은 해당 경로가 새 구축 대상이며 백업과 복구 절차가 확인된 경우에만 실행하세요. 운영 DB 또는 경로가 불명확한 환경에서는 실행하면 안 됩니다.
+
+DB1을 먼저 시작하고 Leader 선출을 확인한 뒤 DB2를 시작합니다.
+
+```bash
+sudo systemctl enable --now patroni
+sudo patronictl -c /etc/patroni/patroni.yml list
+curl -fsS http://<DB1_IP>:8008/primary
+curl -fsS http://<DB2_IP>:8008/replica
+```
+
+`bootstrap.dcs`와 `bootstrap.pg_hba`는 최초 cluster bootstrap에 사용됩니다. 이미 생성된 클러스터의 동적 설정은 파일만 수정하지 말고 `patronictl edit-config`로 변경하세요.
+
+### 3. Zabbix DB와 TimescaleDB schema 생성
+
+Primary DB에서 계정과 DB를 생성합니다. 예시 비밀번호를 그대로 사용하지 마세요.
+
+```sql
+CREATE USER zabbix WITH PASSWORD '<DB_PASSWORD>';
+CREATE DATABASE zabbix OWNER zabbix;
+\c zabbix
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+CREATE USER zbx_monitor WITH PASSWORD '<MONITOR_PASSWORD>';
+GRANT pg_read_all_stats TO zbx_monitor;
+```
+
+Zabbix Server 패키지가 설치된 노드에서 schema를 주입합니다.
+
+```bash
+zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz \
+  | PGPASSWORD='<DB_PASSWORD>' psql -h <DB1_IP> -U zabbix -d zabbix
+
+cat /usr/share/zabbix-sql-scripts/postgresql/timescaledb/schema.sql \
+  | PGPASSWORD='<DB_PASSWORD>' psql -h <DB1_IP> -U zabbix -d zabbix
+```
+
+비밀번호에 `!`, `$`, 공백 등의 문자가 있으면 shell history expansion과 quoting에 주의합니다. 가능하면 `.pgpass`, password file, secret manager를 사용하세요.
+
+### 4. Local HAProxy로 Primary DB 라우팅
+
+Server1과 Server2에 HAProxy를 설치하고 저장소 설정을 배포합니다.
+
+```bash
+sudo apt install -y haproxy
+sudo install -o root -g root -m 0644 HAproxy/haproxy.cfg /etc/haproxy/haproxy.cfg
+sudoedit /etc/haproxy/haproxy.cfg   # DB1/DB2 주소 교체
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+sudo systemctl enable --now haproxy
+```
+
+HAProxy는 `127.0.0.1:5432`에서 대기하고, Patroni의 `/primary`가 HTTP 200인 DB에만 연결을 전달합니다.
+
+```bash
+PGPASSWORD='<DB_PASSWORD>' psql -h 127.0.0.1 -U zabbix -d zabbix \
+  -c 'SELECT inet_server_addr(), pg_is_in_recovery();'
+```
+
+`pg_is_in_recovery()` 결과가 `f`여야 쓰기 가능한 Primary DB로 연결된 것입니다.
+
+### 5. Zabbix Server Native HA와 Web frontend 구성
+
+Server1과 Server2에 Zabbix 7.0 Server, SQL scripts, Nginx, PHP-FPM을 설치한 뒤 설정을 배포합니다.
+
+```bash
+sudo install -o root -g zabbix -m 0640 Zabbix/zabbix_server.conf /etc/zabbix/zabbix_server.conf
+sudo install -o root -g root -m 0644 Nginx/zabbix.conf /etc/nginx/conf.d/zabbix.conf
+sudo install -o root -g www-data -m 0640 Zabbix/zabbix.conf.php /etc/zabbix/web/zabbix.conf.php
+```
+
+각 서버에서 반드시 다르게 설정할 값:
+
+```ini
+# Server1
+HANodeName=zabbix-server1
+NodeAddress=<SERVER1_IP>:10051
+
+# Server2
+HANodeName=zabbix-server2
+NodeAddress=<SERVER2_IP>:10051
+```
+
+공통 DB 연결은 Local HAProxy를 사용합니다.
+
+```ini
+DBHost=127.0.0.1
+DBPort=5432
+DBName=zabbix
+DBUser=zabbix
+DBPassword=<DB_PASSWORD>
+```
+
+Frontend의 `$ZBX_SERVER`와 `$ZBX_SERVER_PORT`는 지정하지 않습니다. 그래야 DB의 HA 노드 정보로 현재 Active Server를 자동 탐색할 수 있습니다. 저장소의 `$DB['PORT']='0'`은 PostgreSQL 기본 포트를 의미하며, 명시하려면 `'5432'`로 바꿀 수 있습니다.
+
+```bash
+sudo nginx -t
+sudo php -l /etc/zabbix/web/zabbix.conf.php
+sudo zabbix_server -T -c /etc/zabbix/zabbix_server.conf
+sudo systemctl restart haproxy php8.3-fpm nginx zabbix-server
+sudo zabbix_server -R ha_status
+```
+
+두 서버가 동일한 DB를 사용하되 서로 다른 `HANodeName`과 `NodeAddress`를 갖는지 확인합니다.
+
+### 6. Zabbix Proxy Group 구성
+
+Proxy1과 Proxy2에 Zabbix Proxy(SQLite)를 설치하고 설정을 배포합니다.
+
+```bash
+sudo install -o root -g zabbix -m 0640 Zabbix/zabbix_proxy.conf /etc/zabbix/zabbix_proxy.conf
+sudoedit /etc/zabbix/zabbix_proxy.conf
+sudo zabbix_proxy -T -c /etc/zabbix/zabbix_proxy.conf
+sudo systemctl enable --now zabbix-proxy
+```
+
+Active Proxy가 동일 Zabbix Server HA cluster를 바라볼 때 서버 주소는 **세미콜론**으로 구분합니다.
+
+```ini
+ProxyMode=0
+Server=<SERVER1_IP>;<SERVER2_IP>
+Hostname=zabbix-proxy1  # Proxy2에서는 zabbix-proxy2
+DBName=/var/lib/zabbix/zabbix_proxy.db
+ProxyBufferMode=hybrid
+ProxyMemoryBufferSize=16M
+```
+
+Web UI에서 다음 순서로 등록합니다.
+
+1. `Administration → Proxy groups → Create proxy group`
+2. Group name을 `ixcloud-proxy-group`으로 지정
+3. Failover period `1m`, Minimum online proxies `1` 설정
+4. Proxy1과 Proxy2를 각각 생성하고 동일 그룹에 할당
+
+2,000 hosts / 5,000 NVPS 테스트에서는 Proxy configuration cache가 부족해질 수 있었습니다. 환경 규모에 맞춰 별도 include 파일로 조정합니다.
+
+```ini
+# /etc/zabbix/zabbix_proxy.d/10-capacity.conf
+CacheSize=256M
+```
+
+메모리 값은 테스트 결과와 호스트·아이템 수를 기준으로 산정하고 변경 후 프로세스 busy, queue, cache 사용률을 다시 확인하세요.
+
+### 7. Zabbix Agent 2 연결
+
+Agent 설정에서 Passive check 허용 대상은 쉼표로, 동일 HA cluster 또는 Proxy Group의 Active check 대상은 세미콜론으로 구분합니다.
+
+```ini
+Server=<PROXY1_IP>,<PROXY2_IP>
+ServerActive=<PROXY1_IP>;<PROXY2_IP>
+Hostname=<EXACT_ZABBIX_HOST_NAME>
+```
+
+```bash
+sudo zabbix_agent2 -T -c /etc/zabbix/zabbix_agent2.conf
+sudo systemctl enable --now zabbix-agent2
+sudo journalctl -u zabbix-agent2 -n 100 --no-pager
+```
+
+`Hostname`은 Web UI에 등록한 Host name과 대소문자까지 일치해야 합니다. Agent가 Server에 직접 연결되는 구조라면 Proxy IP 대신 Server1/Server2 주소를 같은 구분자 규칙으로 지정합니다.
+
+### 8. DNS·RTMP External Check 포팅
+
+#### DNS Check
+
+`dig`로 지정 DNS Server의 A record를 질의하고 JSON을 반환합니다.
+
+```json
+{"response":"success","time":0.023,"ip":"192.0.2.10"}
+```
+
+권장 Item 설계:
+
+- Master Item: `check_dns.sh["{$DNS.SERVER}","{$DNS.DOMAIN}"]`, Text
+- Dependent Item: `$.response`, Text
+- Dependent Item: `$.time`, Numeric(float), unit `s`
+- Dependent Item: `$.ip`, Text
+
+운영 적용 시 `dig` 종료 코드, `SERVFAIL`, `NXDOMAIN`, 복수 A record를 구분하고 인자를 검증해야 합니다.
+
+#### RTMP Check
+
+`rtmpdump`로 짧은 미디어 구간을 실제 수신하고, 수신 파일이 존재하면 `1`, 실패하면 `0`을 반환합니다. 1차 실패 시 재시도하며 Trigger는 최근 2분간 성공 여부로 오탐을 줄입니다.
+
+```text
+max(/RTMP Stream Monitoring/check_rtmp.sh["{$RTMP.URL}"],2m)=0
+```
+
+운영 스크립트는 다음 조건을 만족해야 합니다.
+
+- `mktemp`로 임시 파일 생성
+- `trap`으로 정상·비정상 종료 시 파일 삭제
+- `timeout`으로 최대 실행시간 제한
+- Zabbix `Timeout`보다 짧은 실행시간 보장
+- URL 입력 검증 및 실행 오류 로그 분리
+
+배포 예시:
+
+```bash
+sudo install -o zabbix -g zabbix -m 0750 check_dns.sh /usr/lib/zabbix/externalscripts/check_dns.sh
+sudo install -o zabbix -g zabbix -m 0750 check_rtmp.sh /usr/lib/zabbix/externalscripts/check_rtmp.sh
+sudo -u zabbix /usr/lib/zabbix/externalscripts/check_dns.sh <DNS_SERVER> example.com
+sudo -u zabbix /usr/lib/zabbix/externalscripts/check_rtmp.sh '<RTMP_URL>'
+```
+
+### 9. 통합 검증
+
+```bash
+# etcd
+etcdctl endpoint health --cluster
+
+# Patroni/PostgreSQL
+sudo patronictl -c /etc/patroni/patroni.yml list
+PGPASSWORD='<DB_PASSWORD>' psql -h 127.0.0.1 -U zabbix -d zabbix \
+  -c 'SELECT pg_is_in_recovery();'
+
+# Zabbix Server HA
+sudo zabbix_server -R ha_status
+
+# 서비스 및 최근 오류
+systemctl --no-pager --full status patroni haproxy zabbix-server zabbix-proxy zabbix-agent2
+journalctl -p warning..alert --since '-30 min' --no-pager
+```
+
+Web UI에서는 다음을 확인합니다.
+
+- `Reports → System information`: Zabbix Server Active/Standby 상태
+- `Administration → Proxies`: 두 Proxy의 online 상태와 group 배정
+- `Monitoring → Latest data`: Agent, DNS, RTMP 데이터 갱신
+- `Monitoring → Queue`: 지연 Item 유무
+- DB/Proxy internal item: cache, process busy, NVPS, replication lag
+
+### 10. Rollback 기준
+
+- 신규 환경의 수집·알림이 검증되기 전 기존 Server 데몬을 제거하지 않습니다.
+- 병행 운영 중 중복 알림을 방지하도록 한쪽 Action 또는 Media Type을 비활성화합니다.
+- 전환 실패 시 Agent의 `Server`와 `ServerActive`를 기존 주소로 복구하고 Agent를 재시작합니다.
+- 기존 DB와 VM은 보존 기간 동안 read-only 조회 또는 snapshot 복구 용도로 유지합니다.
+- 신규 데이터와 기존 데이터가 동시에 쓰이지 않도록 활성 Server를 명확히 한 뒤 rollback합니다.
+
+## Zabbix 및 Nagios 마이그레이션
+
+### 호스트 정규화
+
+Nagios의 259개 호스트를 다음 순서로 기존 Zabbix 대상과 대조했습니다.
+
+1. Nagios host/service 목록과 Zabbix host 목록 추출
+2. Hostname 기준 1차 비교
+3. IP 주소 기준 2차 교차검증
+4. 서로 다른 이름으로 등록된 동일 대상 매핑
+5. 중복 객체 병합 및 누락 대상 신규 등록
+6. 기존 임계치·알림 조건을 서비스별로 재검증
+
+### 검사 항목 치환
+
+| Nagios 검사 | Zabbix 구현 |
+| --- | --- |
+| HTTP 상태·응답시간 | HTTP Agent Item |
+| 웹 로그인 흐름 | Web Scenario |
+| SSL 인증서 만료 | Agent 2 Certificate Template |
+| ICMP Ping | ICMP Ping Template |
+| CPU·Memory·Filesystem | Agent 2 OS Template |
+| DNS 질의·응답 IP | External Check + Dependent Item |
+| RTMP Stream 상태 | `rtmpdump` External Check |
+
+### Import와 Cut-over 순서
+
+```text
+Template → Host Group → Host → Item/Trigger 검증 → Action/Media Type
+```
+
+1. 기존 Zabbix 설정을 JSON/YAML로 export합니다.
+2. 신규 Zabbix 7.0에 의존성 순서대로 import합니다.
+3. 일부 대상부터 Agent 2와 Proxy Group으로 전환합니다.
+4. 1~4주간 기존 시스템과 병행 운영하며 수집 누락과 알림 오탐을 비교합니다.
+5. 안정화 후 기존 Zabbix Server 데몬을 중지합니다.
+6. 과거 History/Trend 조회가 필요하면 구형 Web·DB만 제한적으로 유지합니다.
+7. 보존 기간 종료 후 snapshot 또는 백업을 확인하고 기존 자원을 폐기합니다.
+
+## 부하 테스트
+
+`Load_Test` 스크립트는 Dummy Trapper 환경에서 처리량과 장애 시 버퍼 동작을 확인하기 위해 사용했습니다.
+
+```text
+2,000 hosts × 25 items = 50,000 values
+50,000 values ÷ 10 seconds = 5,000 NVPS
+```
+
+권장 실행 순서:
+
+1. Dummy Trapper Template과 25개 Item을 준비합니다.
+2. `create_hosts.py`로 Dummy Host를 생성합니다.
+3. `add_triggers.py`로 25개 Trigger를 추가합니다.
+4. 4개 load generator에서 host ID 범위를 500개씩 나눠 실행합니다.
+5. Server/Proxy busy, queue, cache, DB write I/O와 slow query를 관찰합니다.
+6. 테스트 후 `delete_hosts.py`로 생성한 대상을 정리합니다.
+
+```bash
+python3 Load_Test/load_generator.py 1 500
+python3 Load_Test/load_generator.py 501 1000
+```
+
+> 현재 API 스크립트에는 테스트 당시 API endpoint, group ID, proxy group ID와 토큰 값이 하드코딩되어 있습니다. 실행 전 토큰을 폐기·재발급하고 환경변수로 분리하며, ID는 API 조회 결과를 사용하도록 수정해야 합니다. 테스트는 운영 환경과 분리된 staging에서 수행하세요.
+
+## Failover 검증
+
+### DB Failover
+
+```text
+Primary DB 중지
+  → Patroni 장애 감지 및 Replica 승격
+  → HAProxy /primary 200 확인
+  → Zabbix DB session 재연결
+```
+
+- 연결 복구: **18.62초**
+- Standby 승격 및 HAProxy routing 전환: 성공
+- 테스트 범위에서 History 누락: 관찰되지 않음
+
+수동 switchover는 다음 명령으로 수행합니다.
+
+```bash
+sudo patronictl -c /etc/patroni/patroni.yml switchover
+```
+
+### Zabbix Server Failover
+
+```text
+Active Server 중지
+  → heartbeat 갱신 중단
+  → Standby가 Active로 승격
+  → Proxy Group manager 및 수집 프로세스 시작
+```
+
+- Active 승격: **2.55초**
+- 전체 서비스 복구: **6.61초**
+- 정상 종료 시 History·Trend flush: 확인
+
+### Proxy Failover
+
+```text
+Proxy 1 중지
+  → 1분 failover period 경과
+  → Server가 offline 판정
+  → Proxy 2로 Host 재할당 및 configuration 전송
+```
+
+- Proxy 장애 감지: **63.35초**
+- Host 이관 완료: **70.77초**
+- Active Check: Agent/Proxy buffer로 보존 가능
+- Passive Check: 전환 시간 동안 일부 수집 공백 가능
+
+운영 전에는 정상 service stop뿐 아니라 VM power-off, network partition, etcd quorum 손실, replication lag 상태, Proxy 동시 장애, HAProxy 장애와 Frontend 장애도 별도로 검증해야 합니다.
+
+## 트러블슈팅
+
+### Patroni가 Leader를 선출하지 못함
+
+**증상:** 두 DB 노드가 모두 Replica로 표시되거나 cluster initialize lock 획득에 실패합니다.
+
+**확인:** 기존 PostgreSQL data directory, etcd cluster scope, 파일 권한, `config.yml` 경로와 systemd 조건을 확인합니다.
+
+```bash
+sudo journalctl -u patroni -n 200 --no-pager
+sudo patronictl -c /etc/patroni/patroni.yml list
+etcdctl get /service/zabbix-ha/ --prefix
+```
+
+새 구축임이 확인된 경우에만 백업 후 data directory를 초기화하고 DB1 → DB2 순서로 bootstrap합니다.
+
+### HAProxy는 살아 있지만 DB가 read-only임
+
+- 단순 TCP 5432가 아닌 Patroni `/primary`를 health check하는지 확인합니다.
+- 두 backend가 동시에 UP인지 확인합니다.
+- `SELECT pg_is_in_recovery();`가 `f`인지 확인합니다.
+- Patroni REST API의 주소와 HAProxy `check port 8008` 연결을 확인합니다.
+
+### Proxy가 Server HA cluster에 연결되지 않음
+
+- Active Proxy의 `Server` 주소가 세미콜론으로 구분됐는지 확인합니다.
+- Proxy `Hostname`과 Web UI 등록 이름이 정확히 일치하는지 확인합니다.
+- 10051/TCP와 TLS/PSK 설정이 양쪽에서 동일한지 확인합니다.
+
+### Agent active check가 중복되거나 수신되지 않음
+
+- Passive 허용 목록인 `Server`는 쉼표를 사용합니다.
+- 동일 HA cluster 또는 Proxy Group인 `ServerActive`는 세미콜론을 사용합니다.
+- 서로 독립된 여러 Server/cluster를 병렬 사용하려는 경우에만 쉼표를 사용합니다.
+
+### Proxy shared memory 부족
+
+2,000 hosts / 5,000 NVPS 테스트에서 기본 configuration cache가 부족해 Proxy가 종료되는 현상이 있었습니다. `CacheSize=256M`으로 상향 후 재발하지 않았지만, 이 값은 고정 권장값이 아니라 해당 테스트 규모의 결과입니다.
+
+```bash
+grep -Ei 'cannot allocate|out of memory|cache' /var/log/zabbix/zabbix_proxy.log
+```
+
+## 운영·보안 체크리스트
+
+- [ ] 저장소와 Git history에 실제 API token·DB password가 없는가?
+- [ ] Zabbix API와 Web UI가 HTTPS를 사용하는가?
+- [ ] Server↔Proxy↔Agent 통신에 PSK 또는 certificate TLS를 적용했는가?
+- [ ] Patroni REST API 8008과 etcd 2379/2380을 관리망으로 제한했는가?
+- [ ] PostgreSQL 5432와 `pg_hba`가 필요한 source CIDR만 허용하는가?
+- [ ] `local ... trust` 정책이 운영 보안 기준에 부합하는가?
+- [ ] etcd 및 Patroni 설정 백업과 복구 절차가 있는가?
+- [ ] PostgreSQL base backup, WAL 보존 및 복구 테스트가 완료됐는가?
+- [ ] Zabbix DB schema upgrade 전 snapshot/backup을 확보했는가?
+- [ ] External Check 입력 검증, timeout, 임시 파일 정리를 적용했는가?
+- [ ] Failover 이후 replication lag, timeline, queue, unsupported item을 확인했는가?
+- [ ] 운영 변경과 장애 테스트의 실행 시각·RTO·결과를 로그로 남겼는가?
+
+## 향후 개선
+
+- Ansible로 Agent 2·Proxy·Server 설정 배포 자동화
+- Vault 기반 secret 관리와 TLS/PSK 표준화
+- Nagios configuration parser 및 Host/Template 등록 API 자동화
+- DNS 다중 IP·RCODE 처리, RTMP bitrate/codec/수신 byte 측정
+- Proxy별 NVPS와 Host 분배량 기반 capacity tuning
+- DB replication lag, WAL 증가율과 etcd quorum 자체 모니터링
+- VM power-off, network partition, 동시 다중 장애 chaos test
+- Runbook과 장애 알림 자동 연결
 
 ---
 
+이 프로젝트의 수치는 특정 테스트 환경에서 수집한 결과이며, 실제 운영 RTO/RPO는 네트워크 지연, 데이터량, 복제 모드, 하드웨어, Zabbix process tuning과 장애 유형에 따라 달라질 수 있습니다.
